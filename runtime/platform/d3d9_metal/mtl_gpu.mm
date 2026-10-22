@@ -2,6 +2,7 @@
 #include "mtl_device.h"
 #include "mtl_shadercache.h"
 #include "dish/lifecycle.h"
+#include "dish/vfs.h"
 #include "dish/mainthread.h"
 #include <algorithm>
 #include <chrono>
@@ -643,6 +644,22 @@ HRESULT MtlDevice::do_present() {
         stats().frames++;
         static uint64_t last_report_ns = 0;
         const uint64_t tnow = now_ns();
+        {
+            // hitch log: a frame over 50 ms says what happened during it (first-use shaders / pipelines, texture conversion, file reads)
+            struct Snap { uint64_t t, shaders, pipes, archive, blocks, xcode_ns, upload, read; };
+            static Snap prev{};
+            MtlStats &s = stats();
+            Snap cur{tnow, s.shaders_created.load(), s.pipelines_created.load(), s.pipeline_archive_hits.load(), s.transcode_blocks.load(),
+                     s.transcode_ns.load() + s.decode_ns.load(), s.upload_bytes.load(), file_read_bytes_total()};
+            if (prev.t && cur.t - prev.t > 50000000ull) {
+                LOGI(LC_GFX, "hitch: %.0f ms frame; %llu new shaders (%lld compiling), %llu new pipelines (%llu from archive), %.1f MB textures "
+                     "uploaded (%.0f ms converting), %.1f MB read from files",
+                     (cur.t - prev.t) / 1e6, (unsigned long long)(cur.shaders - prev.shaders), (long long)s.shaders_pending.load(),
+                     (unsigned long long)(cur.pipes - prev.pipes), (unsigned long long)(cur.archive - prev.archive), (cur.upload - prev.upload) / 1048576.0,
+                     (cur.xcode_ns - prev.xcode_ns) / 1e6, (cur.read - prev.read) / 1048576.0);
+            }
+            prev = cur;
+        }
         if (tnow - last_report_ns > 5000000000ull) {
             last_report_ns = tnow;
             MtlStats &s = stats();

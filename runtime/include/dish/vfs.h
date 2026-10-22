@@ -40,4 +40,7 @@ std::string vfs_known_folder(int csidl);    // CSIDL_* -> canonical guest path (
 // For logging: map a host path back to a guest path if possible
 std::string vfs_host_to_guest(const std::string &host);
 
+// Bytes the game has read from files so far (ReadFile); the Metal backend's hitch log reports what a slow frame read.
+uint64_t file_read_bytes_total();
+
 }  // namespace dish

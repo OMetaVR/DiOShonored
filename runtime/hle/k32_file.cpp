@@ -26,6 +26,8 @@
 #define ST_CTIME_NS(st) ((int64_t)(st).st_ctim.tv_sec * 1000000000ll + (st).st_ctim.tv_nsec)
 #endif
 
+#include <atomic>
+
 namespace dish {
 namespace {
 
@@ -210,6 +212,7 @@ void complete_overlapped(uint32_t ov, uint32_t n, uint32_t status) {
     }
 }
 
+std::atomic<uint64_t> g_read_bytes{0};
 uint32_t k32_ReadFile(uint32_t h, uint32_t buf, uint32_t n, uint32_t pread_, uint32_t ov) {
     auto f = file_of(h);
     if (!f || f->is_dir) { set_last_error(ERR_INVALID_HANDLE); return 0; }
@@ -223,6 +226,7 @@ uint32_t k32_ReadFile(uint32_t h, uint32_t buf, uint32_t n, uint32_t pread_, uin
         else if (got > 0 && ov) f->pos = off + (uint64_t)got;
     }
     if (got < 0) { set_last_error(errno_to_win(errno)); return 0; }
+    g_read_bytes.fetch_add((uint64_t)got, std::memory_order_relaxed);
     if (ov && f->overlapped) {
         if (got == 0 && n) { complete_overlapped(ov, 0, 0xC0000011u); set_last_error(ERR_HANDLE_EOF); return 0; }
         complete_overlapped(ov, (uint32_t)got, 0);
@@ -828,6 +832,8 @@ uint32_t k32_UnmapViewOfFile(uint32_t base) {
 uint32_t k32_FlushViewOfFile(uint32_t, uint32_t) { return 1; }
 
 }  // namespace
+
+uint64_t file_read_bytes_total() { return g_read_bytes.load(std::memory_order_relaxed); }
 
 HLE("kernel32.dll", "CreateFileW", Stdcall, k32_CreateFileW);
 HLE("kernel32.dll", "CreateFileA", Stdcall, k32_CreateFileA);
