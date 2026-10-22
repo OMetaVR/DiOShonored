@@ -15,6 +15,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <pthread.h>
 #include <string>
@@ -216,6 +217,16 @@ static const char kSettingsDefault[] =
     "#\n"
     "# render_height: lines the game renders before MetalFX upscales to the screen (an iPhone 13 has 1170).\n"
     "#   720 = default (best balance on A15-class phones), 900 / 1080 = sharper, 1170 = native. Higher costs GPU time and memory.\n"
+    "render_height = 720\n"
+    "#\n"
+    "# frame_rate_cap: auto = 60, and 30 while the phone is hot (iOS throttles it then; a steady 30 beats an uneven 40).\n"
+    "#   30 = always 30 (cooler, longer battery), 60 = never capped.\n"
+    "frame_rate_cap = auto\n";
+static const char kSettingsDev11[] =   // the dev11-dev13 default, upgraded like the dev10 one
+    "# Dishonored for iOS settings. Edit in the Files app; changes apply the next time the app starts.\n"
+    "#\n"
+    "# render_height: lines the game renders before MetalFX upscales to the screen (an iPhone 13 has 1170).\n"
+    "#   720 = default (best balance on A15-class phones), 900 / 1080 = sharper, 1170 = native. Higher costs GPU time and memory.\n"
     "render_height = 720\n";
 // the file dev10 wrote (default 900); replaced by the new default when the player never edited it
 static const char kSettingsDev10[] =
@@ -233,7 +244,7 @@ static void apply_settings(const std::string &dir) {
         while ((n = fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
         fclose(f);
     }
-    if (text.empty() || text == kSettingsDev10) {
+    if (text.empty() || text == kSettingsDev10 || text == kSettingsDev11) {
         if (FILE *f = fopen(path.c_str(), "wb")) { fputs(kSettingsDefault, f); fclose(f); }
         text = kSettingsDefault;
     }
@@ -243,14 +254,18 @@ static void apply_settings(const std::string &dir) {
         size_t e = text.find('\n', pos);
         if (e == std::string::npos) e = text.size();
         int v;
+        char word[16] = {};
         if (sscanf(text.substr(pos, e - pos).c_str(), " render_height = %d", &v) == 1) height = v;
+        else if (sscanf(text.substr(pos, e - pos).c_str(), " frame_rate_cap = %15s", word) == 1)
+            setenv("DISH_FRAME_RATE_CAP", !strcmp(word, "30") ? "30" : !strcmp(word, "60") ? "60" : "auto", 0);
         pos = e + 1;
     }
     height = std::max(480, std::min(height, 1440));
     char v[16];
     snprintf(v, sizeof v, "%d", height);
     setenv("DISH_METAL_INTERNAL_HEIGHT", v, 0);   // the environment still wins (tests)
-    LOGI(LC_CORE, "settings: render_height %s", getenv("DISH_METAL_INTERNAL_HEIGHT"));
+    LOGI(LC_CORE, "settings: render_height %s, frame_rate_cap %s", getenv("DISH_METAL_INTERNAL_HEIGHT"),
+         getenv("DISH_FRAME_RATE_CAP") ? getenv("DISH_FRAME_RATE_CAP") : "auto");
 }
 
 // The game remembers its last resolution in DishonoredEngine.ini; when it differs from the one display mode we offer, it lays the

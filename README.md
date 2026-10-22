@@ -51,7 +51,7 @@ Early beta. Tested on one device so far.
 | --- | --- |
 | **Device** | iPhone 13 (A15 Bionic, 4 GB), iOS 27.0.1, sideloaded with SideStore + LiveContainer, Backbone One controller |
 | **Works** | Boot, intro movies, menus (Scaleform UI), New Game, mission briefings, loading into and playing the first mission |
-| **Performance** | 42-52 fps in the first mission at 1558x720 (MetalFX-upscaled to 2532x1170); memory about 1.1 GB *(build dev9, being re-measured with the current build)* |
+| **Performance** | About 50 fps in the first mission at 1558x720 (MetalFX-upscaled to 2532x1170) while the phone is cool; GPU about 13-14 ms per frame. When iOS reports the phone as hot, the frame rate is held at a steady 30 by design (`frame_rate_cap` in `dish_settings.ini`: `auto`, `30`, `60`). Memory about 1.1-1.45 GB. Short hitches when new areas or effects load *(build dev12)* |
 | **Render resolution** | 720 lines by default (best balance on A15-class phones), upscaled by MetalFX; set `render_height` in `DishonoredData/dish_settings.ini` (900 / 1080 / 1170 for sharper, at a GPU and memory cost) |
 
 ### Known issues

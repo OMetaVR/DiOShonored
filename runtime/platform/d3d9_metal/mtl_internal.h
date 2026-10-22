@@ -125,6 +125,7 @@ struct Options {
     bool tex_shadow = false;         // DISH_METAL_TEX_SHADOW=1: keep a CPU copy of every DXT level (else READONLY locks hand out copy tokens)
     int upscale = 1;                 // 0 off (bilinear/nearest blit), 1 MetalFX spatial when available, else blit
     int internal_height = 720;
+    int fps_cap = 0;                 // DISH_FRAME_RATE_CAP: 0 = auto (60, 30 while thermally serious), 30, 60
     bool verbose = false;
     std::string cache_dir;
 };

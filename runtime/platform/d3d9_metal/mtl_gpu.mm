@@ -537,8 +537,14 @@ bool MtlDevice::query_poll(MtlQuery *q, bool flush_if_needed) {
 
 // ---- presentation -------------------------------------------------------------------------------------------------------------------------------
 void MtlDevice::pump_thermal() {
-    static NSProcessInfoThermalState state = NSProcessInfoThermalStateNominal;
-    state = [[NSProcessInfo processInfo] thermalState];
+    static NSProcessInfoThermalState last = NSProcessInfoThermalStateNominal;
+    const NSProcessInfoThermalState state = [[NSProcessInfo processInfo] thermalState];
+    if (state != last) {
+        static const char *names[] = {"nominal", "fair", "serious", "critical"};
+        LOGI(LC_GFX, "thermal state: %s -> %s%s", names[std::min<int>((int)last, 3)], names[std::min<int>((int)state, 3)],
+             options().fps_cap == 0 && state >= NSProcessInfoThermalStateSerious ? " (frame rate capped at 30 until it cools down)" : "");
+        last = state;
+    }
     thermal_serious_ = state >= NSProcessInfoThermalStateSerious;
 }
 
@@ -626,9 +632,12 @@ HRESULT MtlDevice::do_present() {
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
         [e endEncoding];
-        // frame pacing: 60 Hz, or 30 Hz when the device is thermally constrained
-        double interval = thermal_serious_ ? 1.0 / 30.0 : 1.0 / 60.0;
-        if (pp_.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE && !thermal_serious_) interval = 0.0;
+        // frame pacing (DISH_FRAME_RATE_CAP / dish_settings.ini frame_rate_cap): auto = 60 Hz, or 30 Hz while the phone is thermally
+        // serious (it throttles anyway; a steady 30 beats an uneven 40); 30 / 60 = fixed
+        const int cap = options().fps_cap;
+        const bool hot30 = cap == 30 || (cap == 0 && thermal_serious_);
+        double interval = hot30 ? 1.0 / 30.0 : 1.0 / 60.0;
+        if (pp_.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE && !hot30) interval = 0.0;
         if (interval > 0.0) [cmd_ presentDrawable:dr afterMinimumDuration:interval];
         else [cmd_ presentDrawable:dr];
         signal_frame_ = true;
