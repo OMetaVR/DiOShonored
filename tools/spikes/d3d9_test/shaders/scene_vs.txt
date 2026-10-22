@@ -1,0 +1,44 @@
+vs_3_0
+dcl_position0 v0
+dcl_texcoord0 v1
+dcl_color v2
+dcl_position0 o0
+dcl_texcoord0 o1
+dcl_color o2
+dcl_texcoord1 o3
+def c5 = 2.00000000e+00, 2.00000000e+00, 0.00000000e+00, 0.00000000e+00
+mul r0.x, v0.x, c0.x
+mul r0.y, v0.y, c0.y
+add r0.x, r0.x, r0.y
+mul r0.y, v0.z, c0.z
+add r0.x, r0.x, r0.y
+add r0.x, r0.x, c0.w
+mul r0.y, v0.x, c1.x
+mul r0.z, v0.y, c1.y
+add r0.y, r0.y, r0.z
+mul r0.z, v0.z, c1.z
+add r0.y, r0.y, r0.z
+add r0.y, r0.y, c1.w
+mul r0.z, v0.x, c2.x
+mul r0.w, v0.y, c2.y
+add r0.z, r0.z, r0.w
+mul r0.w, v0.z, c2.z
+add r0.z, r0.z, r0.w
+add r0.z, r0.z, c2.w
+mul r0.w, v0.x, c3.x
+mul r1.x, v0.y, c3.y
+add r0.w, r0.w, r1.x
+mul r1.x, v0.z, c3.z
+add r0.w, r0.w, r1.x
+add r0.w, r0.w, c3.w
+mov r1.x, r0.x
+mov r1.y, r0.y
+mov r1.z, r0.z
+mov r1.w, r0.w
+mov o0.xyzw, r1.xyzw
+mul r0.xy, v1.xyxx, c5.xyxx
+mov r0.z, c4.y
+mov r0.w, c5.z
+add o3.xy, r0.xyxx, r0.zwzz
+mov o1.xy, v1.xyxx
+mov o2.xyzw, v2.xyzw

@@ -1,0 +1,244 @@
+/* ---- SSE / SSE2 / MMX helpers (portable vector extensions; SSE2 / NEON intrinsics where they matter) -------- */
+#if defined(__SSE2__)
+#  include <emmintrin.h>
+#elif defined(__ARM_NEON)
+#  include <arm_neon.h>
+#endif
+typedef float    v4f  __attribute__((vector_size(16)));
+typedef double   v2d  __attribute__((vector_size(16)));
+typedef int32_t  v4i  __attribute__((vector_size(16)));
+typedef uint32_t v4u  __attribute__((vector_size(16)));
+typedef int16_t  v8h  __attribute__((vector_size(16)));
+typedef uint16_t v8w  __attribute__((vector_size(16)));
+typedef int8_t   v16b __attribute__((vector_size(16)));
+typedef uint8_t  v16u __attribute__((vector_size(16)));
+typedef int64_t  v2l  __attribute__((vector_size(16)));
+typedef uint64_t v2q  __attribute__((vector_size(16)));
+#define LX_F4(x) ((v4f)(x))
+#define LX_D2(x) ((v2d)(x))
+#define LX_I4(x) ((v4i)(x))
+#define LX_U4(x) ((v4u)(x))
+#define LX_H8(x) ((v8h)(x))
+#define LX_W8(x) ((v8w)(x))
+#define LX_B16(x) ((v16b)(x))
+#define LX_U16(x) ((v16u)(x))
+#define LX_Q2(x) ((v2q)(x))
+
+static inline v128 lx_ld128(const uint8_t *p) { v128 v; __builtin_memcpy(&v, p, 16); return v; }
+static inline v128 lx_vfrom32(uint32_t u) { v4u v = {u, 0, 0, 0}; return (v128)v; }
+static inline v128 lx_vfrom64(uint64_t u) { v2q v = {u, 0}; return (v128)v; }
+static inline v128 lx_vmerge32(v128 a, uint32_t u) { v4u v = LX_U4(a); v[0] = u; return (v128)v; }
+static inline v128 lx_vmerge64(v128 a, uint64_t u) { v2q v = LX_Q2(a); v[0] = u; return (v128)v; }
+static inline uint32_t lx_vto32(v128 a) { return LX_U4(a)[0]; }
+static inline uint64_t lx_vto64(v128 a) { return LX_Q2(a)[0]; }
+static inline v128 lx_movss_rr(v128 a, v128 b) { v4u r = LX_U4(a); r[0] = LX_U4(b)[0]; return (v128)r; }
+static inline v128 lx_movsd_rr(v128 a, v128 b) { v2q r = LX_Q2(a); r[0] = LX_Q2(b)[0]; return (v128)r; }
+static inline v128 lx_movq_rr(v128 a, v128 b) { (void)a; v2q r = {LX_Q2(b)[0], 0}; return (v128)r; }
+static inline v128 lx_movhi_to_lo(v128 b) { v2q r = {LX_Q2(b)[1], 0}; return (v128)r; }
+static inline v128 lx_movhi_ld(v128 a, v128 t) { v2q r = LX_Q2(a); r[1] = LX_Q2(t)[0]; return (v128)r; }
+static inline v128 lx_movlhps(v128 a, v128 b) { v2q r = LX_Q2(a); r[1] = LX_Q2(b)[0]; return (v128)r; }
+static inline v128 lx_movhlps(v128 a, v128 b) { v2q r = LX_Q2(a); r[0] = LX_Q2(b)[1]; return (v128)r; }
+
+/* ---- float arithmetic ---------------------------------------------------------------------------- */
+#define LX_FARITH(name, op) \
+  static inline v128 lx_##name##ps(v128 a, v128 b) { return (v128)(LX_F4(a) op LX_F4(b)); } \
+  static inline v128 lx_##name##ss(v128 a, v128 b) { v4f x = LX_F4(a); x[0] = x[0] op LX_F4(b)[0]; return (v128)x; } \
+  static inline v128 lx_##name##pd(v128 a, v128 b) { return (v128)(LX_D2(a) op LX_D2(b)); } \
+  static inline v128 lx_##name##sd(v128 a, v128 b) { v2d x = LX_D2(a); x[0] = x[0] op LX_D2(b)[0]; return (v128)x; }
+LX_FARITH(add, +)
+LX_FARITH(sub, -)
+LX_FARITH(mul, *)
+LX_FARITH(div, /)
+/* x86 min/max return the second operand when either is NaN or both are equal */
+static inline v128 lx_minps(v128 a, v128 b) { v4f x = LX_F4(a), y = LX_F4(b); v4i m = (v4i)(x < y); return (v128)((LX_I4(x) & m) | (LX_I4(y) & ~m)); }
+static inline v128 lx_maxps(v128 a, v128 b) { v4f x = LX_F4(a), y = LX_F4(b); v4i m = (v4i)(x > y); return (v128)((LX_I4(x) & m) | (LX_I4(y) & ~m)); }
+static inline v128 lx_minss(v128 a, v128 b) { v4f x = LX_F4(a); float p = x[0], q = LX_F4(b)[0]; x[0] = p < q ? p : q; return (v128)x; }
+static inline v128 lx_maxss(v128 a, v128 b) { v4f x = LX_F4(a); float p = x[0], q = LX_F4(b)[0]; x[0] = p > q ? p : q; return (v128)x; }
+static inline v128 lx_minpd(v128 a, v128 b) { v2d x = LX_D2(a), y = LX_D2(b); v2l m = (v2l)(x < y); return (v128)(((v2l)x & m) | ((v2l)y & ~m)); }
+static inline v128 lx_maxpd(v128 a, v128 b) { v2d x = LX_D2(a), y = LX_D2(b); v2l m = (v2l)(x > y); return (v128)(((v2l)x & m) | ((v2l)y & ~m)); }
+static inline v128 lx_minsd(v128 a, v128 b) { v2d x = LX_D2(a); double p = x[0], q = LX_D2(b)[0]; x[0] = p < q ? p : q; return (v128)x; }
+static inline v128 lx_maxsd(v128 a, v128 b) { v2d x = LX_D2(a); double p = x[0], q = LX_D2(b)[0]; x[0] = p > q ? p : q; return (v128)x; }
+static inline v128 lx_sqrtps(v128 a, v128 b) { (void)a; return (v128)__builtin_elementwise_sqrt(LX_F4(b)); }
+static inline v128 lx_sqrtss(v128 a, v128 b) { v4f x = LX_F4(a); x[0] = __builtin_sqrtf(LX_F4(b)[0]); return (v128)x; }
+static inline v128 lx_sqrtpd(v128 a, v128 b) { (void)a; return (v128)__builtin_elementwise_sqrt(LX_D2(b)); }
+static inline v128 lx_sqrtsd(v128 a, v128 b) { v2d x = LX_D2(a); x[0] = __builtin_sqrt(LX_D2(b)[0]); return (v128)x; }
+/* rcp / rsqrt are computed exactly (a superset of the 12-bit hardware estimate) */
+static inline v128 lx_rcpps(v128 a, v128 b) { (void)a; return (v128)(1.0f / LX_F4(b)); }
+static inline v128 lx_rcpss(v128 a, v128 b) { v4f x = LX_F4(a); x[0] = 1.0f / LX_F4(b)[0]; return (v128)x; }
+static inline v128 lx_rsqrtps(v128 a, v128 b) { (void)a; return (v128)(1.0f / __builtin_elementwise_sqrt(LX_F4(b))); }
+static inline v128 lx_rsqrtss(v128 a, v128 b) { v4f x = LX_F4(a); x[0] = 1.0f / __builtin_sqrtf(LX_F4(b)[0]); return (v128)x; }
+
+static inline v128 lx_and(v128 a, v128 b) { return a & b; }
+static inline v128 lx_andn(v128 a, v128 b) { return ~a & b; }
+static inline v128 lx_or(v128 a, v128 b) { return a | b; }
+static inline v128 lx_xor(v128 a, v128 b) { return a ^ b; }
+
+/* ---- compares ------------------------------------------------------------------------------------ */
+static inline v4i lx_cmp4(v4f x, v4f y, int p) {
+    switch (p & 7) {
+    case 0: return (v4i)(x == y);
+    case 1: return (v4i)(x < y);
+    case 2: return (v4i)(x <= y);
+    case 3: return (v4i)((x != x) | (y != y));
+    case 4: return (v4i)(x != y);
+    case 5: return ~(v4i)(x < y);
+    case 6: return ~(v4i)(x <= y);
+    default: return (v4i)((x == x) & (y == y));
+    }
+}
+static inline v2l lx_cmp2(v2d x, v2d y, int p) {
+    switch (p & 7) {
+    case 0: return (v2l)(x == y);
+    case 1: return (v2l)(x < y);
+    case 2: return (v2l)(x <= y);
+    case 3: return (v2l)((x != x) | (y != y));
+    case 4: return (v2l)(x != y);
+    case 5: return ~(v2l)(x < y);
+    case 6: return ~(v2l)(x <= y);
+    default: return (v2l)((x == x) & (y == y));
+    }
+}
+static inline v128 lx_cmpps_i(v128 a, v128 b, int p) { return (v128)lx_cmp4(LX_F4(a), LX_F4(b), p); }
+static inline v128 lx_cmppd_i(v128 a, v128 b, int p) { return (v128)lx_cmp2(LX_D2(a), LX_D2(b), p); }
+static inline v128 lx_cmpss_i(v128 a, v128 b, int p) { v4i m = lx_cmp4(LX_F4(a), LX_F4(b), p); v4i r = LX_I4(a); r[0] = m[0]; return (v128)r; }
+static inline v128 lx_cmpsd_i(v128 a, v128 b, int p) { v2l m = lx_cmp2(LX_D2(a), LX_D2(b), p); v2l r = (v2l)a; r[0] = m[0]; return (v128)r; }
+static inline uint32_t lx_comiss(v128 a, v128 b) { float x = LX_F4(a)[0], y = LX_F4(b)[0]; return (x != x || y != y) ? 0x45u : (x > y) ? 0u : (x < y) ? 1u : 0x40u; }
+static inline uint32_t lx_comisd(v128 a, v128 b) { double x = LX_D2(a)[0], y = LX_D2(b)[0]; return (x != x || y != y) ? 0x45u : (x > y) ? 0u : (x < y) ? 1u : 0x40u; }
+static inline v128 lx_pcmpeqb(v128 a, v128 b) { return (v128)(LX_B16(a) == LX_B16(b)); }
+static inline v128 lx_pcmpeqw(v128 a, v128 b) { return (v128)(LX_H8(a) == LX_H8(b)); }
+static inline v128 lx_pcmpeqd(v128 a, v128 b) { return (v128)(LX_I4(a) == LX_I4(b)); }
+static inline v128 lx_pcmpgtb(v128 a, v128 b) { return (v128)(LX_B16(a) > LX_B16(b)); }
+static inline v128 lx_pcmpgtw(v128 a, v128 b) { return (v128)(LX_H8(a) > LX_H8(b)); }
+static inline v128 lx_pcmpgtd(v128 a, v128 b) { return (v128)(LX_I4(a) > LX_I4(b)); }
+
+/* ---- conversions --------------------------------------------------------------------------------- */
+static inline int32_t lx_f2i_t(double x) { return (x >= -2147483648.0 && x < 2147483648.0) ? (int32_t)x : (int32_t)0x80000000; }
+static inline int32_t lx_f2i_r(double x) { return lx_f2i_t(__builtin_rint(x)); }
+static inline v128 lx_cvtsi2ss(v128 a, uint32_t b) { v4f x = LX_F4(a); x[0] = (float)(int32_t)b; return (v128)x; }
+static inline v128 lx_cvtsi2sd(v128 a, uint32_t b) { v2d x = LX_D2(a); x[0] = (double)(int32_t)b; return (v128)x; }
+static inline uint32_t lx_cvttss2si(v128 b) { return (uint32_t)lx_f2i_t((double)LX_F4(b)[0]); }
+static inline uint32_t lx_cvtss2si(v128 b) { return (uint32_t)lx_f2i_r((double)LX_F4(b)[0]); }
+static inline uint32_t lx_cvttsd2si(v128 b) { return (uint32_t)lx_f2i_t(LX_D2(b)[0]); }
+static inline uint32_t lx_cvtsd2si(v128 b) { return (uint32_t)lx_f2i_r(LX_D2(b)[0]); }
+static inline v128 lx_cvtss2sd(v128 a, v128 b) { v2d r = LX_D2(a); r[0] = (double)LX_F4(b)[0]; return (v128)r; }
+static inline v128 lx_cvtsd2ss(v128 a, v128 b) { v4f r = LX_F4(a); r[0] = (float)LX_D2(b)[0]; return (v128)r; }
+static inline v128 lx_cvtdq2ps(v128 a, v128 b) { (void)a; return (v128)__builtin_convertvector(LX_I4(b), v4f); }
+static inline v128 lx_cvttps2dq(v128 a, v128 b) { (void)a; v4f x = LX_F4(b); v4i r = {lx_f2i_t(x[0]), lx_f2i_t(x[1]), lx_f2i_t(x[2]), lx_f2i_t(x[3])}; return (v128)r; }
+static inline v128 lx_cvtps2dq(v128 a, v128 b) { (void)a; v4f x = LX_F4(b); v4i r = {lx_f2i_r(x[0]), lx_f2i_r(x[1]), lx_f2i_r(x[2]), lx_f2i_r(x[3])}; return (v128)r; }
+static inline v128 lx_cvtdq2pd(v128 a, v128 b) { (void)a; v4i x = LX_I4(b); v2d r = {(double)x[0], (double)x[1]}; return (v128)r; }
+static inline v128 lx_cvtpd2ps(v128 a, v128 b) { (void)a; v2d x = LX_D2(b); v4f r = {(float)x[0], (float)x[1], 0, 0}; return (v128)r; }
+static inline v128 lx_cvtps2pd(v128 a, v128 b) { (void)a; v4f x = LX_F4(b); v2d r = {(double)x[0], (double)x[1]}; return (v128)r; }
+static inline v128 lx_cvtpd2dq(v128 a, v128 b) { (void)a; v2d x = LX_D2(b); v4i r = {lx_f2i_r(x[0]), lx_f2i_r(x[1]), 0, 0}; return (v128)r; }
+static inline v128 lx_cvttpd2dq(v128 a, v128 b) { (void)a; v2d x = LX_D2(b); v4i r = {lx_f2i_t(x[0]), lx_f2i_t(x[1]), 0, 0}; return (v128)r; }
+static inline v128 lx_cvtpi2ps(v128 a, v128 b) { v4f r = LX_F4(a); v4i x = LX_I4(b); r[0] = (float)x[0]; r[1] = (float)x[1]; return (v128)r; }
+static inline v128 lx_cvtps2pi(v128 a, v128 b) { (void)a; v4f x = LX_F4(b); v4i r = {lx_f2i_r(x[0]), lx_f2i_r(x[1]), 0, 0}; return (v128)r; }
+static inline v128 lx_cvttps2pi(v128 a, v128 b) { (void)a; v4f x = LX_F4(b); v4i r = {lx_f2i_t(x[0]), lx_f2i_t(x[1]), 0, 0}; return (v128)r; }
+
+/* ---- shuffles ------------------------------------------------------------------------------------ */
+#define lx_shufps_i(a, b, imm) ((v128)__builtin_shufflevector(LX_F4(a), LX_F4(b), (imm) & 3, ((imm) >> 2) & 3, 4 + (((imm) >> 4) & 3), 4 + (((imm) >> 6) & 3)))
+#define lx_shufpd_i(a, b, imm) ((v128)__builtin_shufflevector(LX_D2(a), LX_D2(b), (imm) & 1, 2 + (((imm) >> 1) & 1)))
+#define lx_pshufd_i(a, b, imm) ((v128)__builtin_shufflevector(LX_I4(b), LX_I4(b), (imm) & 3, ((imm) >> 2) & 3, ((imm) >> 4) & 3, ((imm) >> 6) & 3))
+#define lx_pshuflw_i(a, b, imm) ((v128)__builtin_shufflevector(LX_H8(b), LX_H8(b), (imm) & 3, ((imm) >> 2) & 3, ((imm) >> 4) & 3, ((imm) >> 6) & 3, 4, 5, 6, 7))
+#define lx_pshufhw_i(a, b, imm) ((v128)__builtin_shufflevector(LX_H8(b), LX_H8(b), 0, 1, 2, 3, 4 + ((imm) & 3), 4 + (((imm) >> 2) & 3), 4 + (((imm) >> 4) & 3), 4 + (((imm) >> 6) & 3)))
+static inline v128 lx_unpcklps(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_F4(a), LX_F4(b), 0, 4, 1, 5); }
+static inline v128 lx_unpckhps(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_F4(a), LX_F4(b), 2, 6, 3, 7); }
+static inline v128 lx_unpcklpd(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_D2(a), LX_D2(b), 0, 2); }
+static inline v128 lx_unpckhpd(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_D2(a), LX_D2(b), 1, 3); }
+static inline v128 lx_punpcklbw(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_U16(a), LX_U16(b), 0, 16, 1, 17, 2, 18, 3, 19, 4, 20, 5, 21, 6, 22, 7, 23); }
+static inline v128 lx_punpckhbw(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_U16(a), LX_U16(b), 8, 24, 9, 25, 10, 26, 11, 27, 12, 28, 13, 29, 14, 30, 15, 31); }
+static inline v128 lx_punpcklwd(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_W8(a), LX_W8(b), 0, 8, 1, 9, 2, 10, 3, 11); }
+static inline v128 lx_punpckhwd(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_W8(a), LX_W8(b), 4, 12, 5, 13, 6, 14, 7, 15); }
+static inline v128 lx_punpckldq(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_I4(a), LX_I4(b), 0, 4, 1, 5); }
+static inline v128 lx_punpckhdq(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_I4(a), LX_I4(b), 2, 6, 3, 7); }
+static inline v128 lx_punpcklqdq(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_Q2(a), LX_Q2(b), 0, 2); }
+static inline v128 lx_punpckhqdq(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_Q2(a), LX_Q2(b), 1, 3); }
+#define LX_BSR(a, n) ((v128)__builtin_shufflevector(LX_U16(a), (v16u){0}, (n) + 0, (n) + 1, (n) + 2, (n) + 3, (n) + 4, (n) + 5, (n) + 6, (n) + 7, (n) + 8, (n) + 9, (n) + 10, (n) + 11, (n) + 12, (n) + 13, (n) + 14, (n) + 15))
+#define LX_BSL(a, n) ((v128)__builtin_shufflevector((v16u){0}, LX_U16(a), 16 - (n) + 0, 16 - (n) + 1, 16 - (n) + 2, 16 - (n) + 3, 16 - (n) + 4, 16 - (n) + 5, 16 - (n) + 6, 16 - (n) + 7, 16 - (n) + 8, 16 - (n) + 9, 16 - (n) + 10, 16 - (n) + 11, 16 - (n) + 12, 16 - (n) + 13, 16 - (n) + 14, 16 - (n) + 15))
+#define lx_psrldq_i(a, imm) ((imm) > 15 ? (v128){0, 0} : LX_BSR(a, ((imm) > 15 ? 0 : (imm))))
+#define lx_pslldq_i(a, imm) ((imm) > 15 ? (v128){0, 0} : LX_BSL(a, ((imm) > 15 ? 0 : (imm))))
+#define lx_pextrw_i(b, imm) ((uint32_t)LX_W8(b)[(imm) & 7])
+static inline v128 lx_pinsrw_i(v128 a, uint32_t b, int imm) { v8w r = LX_W8(a); r[imm & 7] = (uint16_t)b; return (v128)r; }
+
+/* ---- integer arithmetic -------------------------------------------------------------------------- */
+static inline v128 lx_paddb(v128 a, v128 b) { return (v128)(LX_U16(a) + LX_U16(b)); }
+static inline v128 lx_paddw(v128 a, v128 b) { return (v128)(LX_W8(a) + LX_W8(b)); }
+static inline v128 lx_paddd(v128 a, v128 b) { return (v128)(LX_U4(a) + LX_U4(b)); }
+static inline v128 lx_paddq(v128 a, v128 b) { return (v128)(LX_Q2(a) + LX_Q2(b)); }
+static inline v128 lx_psubb(v128 a, v128 b) { return (v128)(LX_U16(a) - LX_U16(b)); }
+static inline v128 lx_psubw(v128 a, v128 b) { return (v128)(LX_W8(a) - LX_W8(b)); }
+static inline v128 lx_psubd(v128 a, v128 b) { return (v128)(LX_U4(a) - LX_U4(b)); }
+static inline v128 lx_psubq(v128 a, v128 b) { return (v128)(LX_Q2(a) - LX_Q2(b)); }
+static inline v128 lx_paddsb(v128 a, v128 b) { return (v128)__builtin_elementwise_add_sat(LX_B16(a), LX_B16(b)); }
+static inline v128 lx_paddsw(v128 a, v128 b) { return (v128)__builtin_elementwise_add_sat(LX_H8(a), LX_H8(b)); }
+static inline v128 lx_paddusb(v128 a, v128 b) { return (v128)__builtin_elementwise_add_sat(LX_U16(a), LX_U16(b)); }
+static inline v128 lx_paddusw(v128 a, v128 b) { return (v128)__builtin_elementwise_add_sat(LX_W8(a), LX_W8(b)); }
+static inline v128 lx_psubsb(v128 a, v128 b) { return (v128)__builtin_elementwise_sub_sat(LX_B16(a), LX_B16(b)); }
+static inline v128 lx_psubsw(v128 a, v128 b) { return (v128)__builtin_elementwise_sub_sat(LX_H8(a), LX_H8(b)); }
+static inline v128 lx_psubusb(v128 a, v128 b) { return (v128)__builtin_elementwise_sub_sat(LX_U16(a), LX_U16(b)); }
+static inline v128 lx_psubusw(v128 a, v128 b) { return (v128)__builtin_elementwise_sub_sat(LX_W8(a), LX_W8(b)); }
+static inline v128 lx_pmullw(v128 a, v128 b) { return (v128)(LX_W8(a) * LX_W8(b)); }
+static inline v128 lx_pmulhw(v128 a, v128 b) { v8h x = LX_H8(a), y = LX_H8(b), r; for (int k = 0; k < 8; k++) r[k] = (int16_t)(((int32_t)x[k] * (int32_t)y[k]) >> 16); return (v128)r; }
+static inline v128 lx_pmulhuw(v128 a, v128 b) { v8w x = LX_W8(a), y = LX_W8(b), r; for (int k = 0; k < 8; k++) r[k] = (uint16_t)(((uint32_t)x[k] * (uint32_t)y[k]) >> 16); return (v128)r; }
+static inline v128 lx_pmuludq(v128 a, v128 b) { v4u x = LX_U4(a), y = LX_U4(b); v2q r = {(uint64_t)x[0] * y[0], (uint64_t)x[2] * y[2]}; return (v128)r; }
+static inline v128 lx_pmaddwd(v128 a, v128 b) {
+    v8h x = LX_H8(a), y = LX_H8(b); v4u r;
+    for (int k = 0; k < 4; k++) r[k] = (uint32_t)((int32_t)x[2 * k] * (int32_t)y[2 * k]) + (uint32_t)((int32_t)x[2 * k + 1] * (int32_t)y[2 * k + 1]);
+    return (v128)r;
+}
+static inline v128 lx_pmaxsw(v128 a, v128 b) { return (v128)__builtin_elementwise_max(LX_H8(a), LX_H8(b)); }
+static inline v128 lx_pminsw(v128 a, v128 b) { return (v128)__builtin_elementwise_min(LX_H8(a), LX_H8(b)); }
+static inline v128 lx_pmaxub(v128 a, v128 b) { return (v128)__builtin_elementwise_max(LX_U16(a), LX_U16(b)); }
+static inline v128 lx_pminub(v128 a, v128 b) { return (v128)__builtin_elementwise_min(LX_U16(a), LX_U16(b)); }
+static inline v128 lx_pavgb(v128 a, v128 b) { v16u x = LX_U16(a), y = LX_U16(b), r; for (int k = 0; k < 16; k++) r[k] = (uint8_t)(((uint32_t)x[k] + y[k] + 1) >> 1); return (v128)r; }
+static inline v128 lx_pavgw(v128 a, v128 b) { v8w x = LX_W8(a), y = LX_W8(b), r; for (int k = 0; k < 8; k++) r[k] = (uint16_t)(((uint32_t)x[k] + y[k] + 1) >> 1); return (v128)r; }
+static inline v128 lx_psadbw(v128 a, v128 b) {
+    v16u x = LX_U16(a), y = LX_U16(b); v2q r = {0, 0};
+    for (int h = 0; h < 2; h++) { uint64_t s = 0; for (int k = 0; k < 8; k++) { int d = (int)x[8 * h + k] - (int)y[8 * h + k]; s += (uint64_t)(d < 0 ? -d : d); } r[h] = s; }
+    return (v128)r;
+}
+static inline int16_t lx_sat16(int32_t v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v; }
+static inline int8_t lx_sat8(int32_t v) { return v > 127 ? 127 : v < -128 ? -128 : (int8_t)v; }
+static inline uint8_t lx_satu8(int32_t v) { return v > 255 ? 255 : v < 0 ? 0 : (uint8_t)v; }
+static inline v128 lx_packssdw(v128 a, v128 b) { v4i x = LX_I4(a), y = LX_I4(b); v8h r = {lx_sat16(x[0]), lx_sat16(x[1]), lx_sat16(x[2]), lx_sat16(x[3]), lx_sat16(y[0]), lx_sat16(y[1]), lx_sat16(y[2]), lx_sat16(y[3])}; return (v128)r; }
+static inline v128 lx_packsswb(v128 a, v128 b) { v8h x = LX_H8(a), y = LX_H8(b); v16b r; for (int k = 0; k < 8; k++) { r[k] = lx_sat8(x[k]); r[8 + k] = lx_sat8(y[k]); } return (v128)r; }
+static inline v128 lx_packuswb(v128 a, v128 b) { v8h x = LX_H8(a), y = LX_H8(b); v16u r; for (int k = 0; k < 8; k++) { r[k] = lx_satu8(x[k]); r[8 + k] = lx_satu8(y[k]); } return (v128)r; }
+
+/* ---- shifts (immediate `_s` and vector-count `_v` forms) -------------------------------------------- */
+static inline v128 lx_psllw_s(v128 a, uint32_t n) { return n > 15 ? (v128){0, 0} : (v128)(LX_W8(a) << n); }
+static inline v128 lx_pslld_s(v128 a, uint32_t n) { return n > 31 ? (v128){0, 0} : (v128)(LX_U4(a) << n); }
+static inline v128 lx_psllq_s(v128 a, uint32_t n) { return n > 63 ? (v128){0, 0} : (v128)(LX_Q2(a) << n); }
+static inline v128 lx_psrlw_s(v128 a, uint32_t n) { return n > 15 ? (v128){0, 0} : (v128)(LX_W8(a) >> n); }
+static inline v128 lx_psrld_s(v128 a, uint32_t n) { return n > 31 ? (v128){0, 0} : (v128)(LX_U4(a) >> n); }
+static inline v128 lx_psrlq_s(v128 a, uint32_t n) { return n > 63 ? (v128){0, 0} : (v128)(LX_Q2(a) >> n); }
+static inline v128 lx_psraw_s(v128 a, uint32_t n) { return (v128)(LX_H8(a) >> (n > 15 ? 15 : n)); }
+static inline v128 lx_psrad_s(v128 a, uint32_t n) { return (v128)(LX_I4(a) >> (n > 31 ? 31 : n)); }
+static inline uint32_t lx_cnt(v128 b) { uint64_t c = LX_Q2(b)[0]; return c > 255 ? 255u : (uint32_t)c; }
+static inline v128 lx_psllw_v(v128 a, v128 b) { return lx_psllw_s(a, lx_cnt(b)); }
+static inline v128 lx_pslld_v(v128 a, v128 b) { return lx_pslld_s(a, lx_cnt(b)); }
+static inline v128 lx_psllq_v(v128 a, v128 b) { return lx_psllq_s(a, lx_cnt(b)); }
+static inline v128 lx_psrlw_v(v128 a, v128 b) { return lx_psrlw_s(a, lx_cnt(b)); }
+static inline v128 lx_psrld_v(v128 a, v128 b) { return lx_psrld_s(a, lx_cnt(b)); }
+static inline v128 lx_psrlq_v(v128 a, v128 b) { return lx_psrlq_s(a, lx_cnt(b)); }
+static inline v128 lx_psraw_v(v128 a, v128 b) { return lx_psraw_s(a, lx_cnt(b)); }
+static inline v128 lx_psrad_v(v128 a, v128 b) { return lx_psrad_s(a, lx_cnt(b)); }
+
+/* ---- movemask -------------------------------------------------------------------------------------- */
+#if defined(__SSE2__)
+static inline uint32_t lx_movmskps(v128 b) { return (uint32_t)_mm_movemask_ps((__m128)b); }
+static inline uint32_t lx_movmskpd(v128 b) { return (uint32_t)_mm_movemask_pd((__m128d)b); }
+static inline uint32_t lx_pmovmskb(v128 b) { return (uint32_t)_mm_movemask_epi8((__m128i)b); }
+#else
+static inline uint32_t lx_movmskps(v128 b) { v4u x = LX_U4(b); return (x[0] >> 31) | ((x[1] >> 31) << 1) | ((x[2] >> 31) << 2) | ((x[3] >> 31) << 3); }
+static inline uint32_t lx_movmskpd(v128 b) { v2q x = LX_Q2(b); return (uint32_t)((x[0] >> 63) | ((x[1] >> 63) << 1)); }
+static inline uint32_t lx_pmovmskb(v128 b) { v16u x = LX_U16(b); uint32_t r = 0; for (int k = 0; k < 16; k++) r |= (uint32_t)(x[k] >> 7) << k; return r; }
+#endif
+
+/* ---- MMX (64-bit register) variants ------------------------------------------------------------------- */
+#define lx_pshufw_i(a, b, imm) ((v128)__builtin_shufflevector(LX_H8(b), LX_H8(b), (imm) & 3, ((imm) >> 2) & 3, ((imm) >> 4) & 3, ((imm) >> 6) & 3, 4, 5, 6, 7))
+static inline v128 lx_packssdw_mm(v128 a, v128 b) { v4i x = LX_I4(a), y = LX_I4(b); v8h r = {lx_sat16(x[0]), lx_sat16(x[1]), lx_sat16(y[0]), lx_sat16(y[1]), 0, 0, 0, 0}; return (v128)r; }
+static inline v128 lx_packsswb_mm(v128 a, v128 b) { v8h x = LX_H8(a), y = LX_H8(b); v16b r = {0}; for (int k = 0; k < 4; k++) { r[k] = lx_sat8(x[k]); r[4 + k] = lx_sat8(y[k]); } return (v128)r; }
+static inline v128 lx_packuswb_mm(v128 a, v128 b) { v8h x = LX_H8(a), y = LX_H8(b); v16u r = {0}; for (int k = 0; k < 4; k++) { r[k] = lx_satu8(x[k]); r[4 + k] = lx_satu8(y[k]); } return (v128)r; }
+static inline v128 lx_punpckhbw_mm(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_U16(a), LX_U16(b), 4, 20, 5, 21, 6, 22, 7, 23, 0, 0, 0, 0, 0, 0, 0, 0); }
+static inline v128 lx_punpckhwd_mm(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_W8(a), LX_W8(b), 2, 10, 3, 11, 0, 0, 0, 0); }
+static inline v128 lx_punpckhdq_mm(v128 a, v128 b) { return (v128)__builtin_shufflevector(LX_I4(a), LX_I4(b), 1, 5, 0, 0); }
+static inline uint32_t lx_pmovmskb_mm(v128 b) { return lx_pmovmskb(b) & 0xffu; }

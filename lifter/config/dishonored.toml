@@ -1,0 +1,337 @@
+# Lifter configuration for Dishonored (Steam, build as installed locally).
+# Addresses, names and hashes only. No game bytes.
+
+# Imports that never return (dll!name, lower-case dll).
+noreturn_imports = [
+  "kernel32.dll!ExitProcess",
+  "kernel32.dll!ExitThread",
+  "kernel32.dll!FatalExit",
+  "kernel32.dll!FatalAppExitA",
+  "kernel32.dll!FatalAppExitW",
+  "msvcr90.dll!exit",
+  "msvcr90.dll!_exit",
+  "msvcr90.dll!abort",
+  "msvcr90.dll!longjmp",
+  "msvcr90.dll!_invoke_watson",
+  "msvcr90.dll!_amsg_exit",
+  "msvcr90.dll!_CxxThrowException",
+  "msvcr90.dll!?terminate@@YAXXZ",
+  "msvcr90.dll!_purecall",
+  "msvcr90.dll!_invalid_parameter_noinfo_noreturn",
+  "msvcr90.dll!_wassert",
+  "msvcr90.dll!_assert",
+  "msvcr90.dll!_local_unwind2",
+]
+
+# Functions (module!export or absolute address) that never return.
+noreturn = [
+  "msvcr90.dll!exit",
+  "msvcr90.dll!_exit",
+  "msvcr90.dll!abort",
+  "msvcr90.dll!longjmp",
+  "msvcr90.dll!_amsg_exit",
+  "msvcr90.dll!_invoke_watson",
+  "msvcr90.dll!_CxxThrowException",
+  "msvcr90.dll!?terminate@@YAXXZ",
+  "msvcr90.dll!_purecall",
+]
+
+
+# Module list. Bases: exe at its preferred base (required by the ABI doc); the CRT DLLs keep their preferred bases
+# (they do not overlap the exe image or the thunk region).
+[[module]]
+name = "msvcr90.dll"
+relpath = "Binaries/Win32/Microsoft.VC90.CRT/msvcr90.dll"
+base = 0x78520000
+
+[[module]]
+name = "msvcp90.dll"
+relpath = "Binaries/Win32/Microsoft.VC90.CRT/msvcp90.dll"
+base = 0x78480000
+
+[[module]]
+name = "Dishonored.exe"
+relpath = "Binaries/Win32/Dishonored.exe"
+base = 0x400000
+
+# Bink video (the game's own copy): imported statically by the exe, so it is initialised at startup. Preferred base 0x18000000.
+[[module]]
+name = "binkw32.dll"
+relpath = "Binaries/Win32/binkw32.dll"
+base = 0x18000000
+
+# PhysX 2.8 (the game's own copies; software simulation, no CUDA). All five prefer 0x10000000, so they are rebased (each has .reloc)
+# into 0x10000000-0x10700000. PhysXLoader is delay-loaded by the exe; PhysXCore and PhysXCooking are loaded by PhysXLoader at run
+# time. The runtime runs their DllMain on the first LoadLibrary, not at startup (nothing imports them statically).
+[[module]]
+name = "PhysXLoader.dll"
+relpath = "Binaries/Win32/PhysXLoader.dll"
+base = 0x10000000
+
+[[module]]
+name = "PhysXCore.dll"
+relpath = "Binaries/Win32/PhysXCore.dll"
+base = 0x10100000
+
+[[module]]
+name = "PhysXCooking.dll"
+relpath = "Binaries/Win32/PhysXCooking.dll"
+base = 0x10500000
+
+# Native host-function substitution (hot CRT functions). Host symbols are ovr_<name> with the GuestFn signature
+# (kind = "guestfn"), or double-typed for x87 helpers (kind = "x87_1" / "x87_2"), see docs/lifter.md.
+[[override]]
+module = "msvcr90.dll"
+export = "memcpy"
+pop = 0
+host = "ovr_memcpy"
+[[override]]
+module = "msvcr90.dll"
+export = "memmove"
+pop = 0
+host = "ovr_memmove"
+[[override]]
+module = "msvcr90.dll"
+export = "memset"
+pop = 0
+host = "ovr_memset"
+[[override]]
+module = "msvcr90.dll"
+export = "strlen"
+pop = 0
+host = "ovr_strlen"
+[[override]]
+module = "msvcr90.dll"
+export = "wcslen"
+pop = 0
+host = "ovr_wcslen"
+[[override]]
+module = "msvcr90.dll"
+export = "_wcsicmp"
+pop = 0
+host = "ovr__wcsicmp"
+[[override]]
+module = "msvcr90.dll"
+export = "_stricmp"
+pop = 0
+host = "ovr__stricmp"
+[[override]]
+module = "msvcr90.dll"
+export = "_controlfp_s"
+pop = 0
+host = "ovr__controlfp_s"
+[[override]]
+module = "msvcr90.dll"
+export = "floor"
+pop = 0
+host = "ovr_floor"
+[[override]]
+module = "msvcr90.dll"
+export = "ceil"
+pop = 0
+host = "ovr_ceil"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIfmod"
+host = "dish_ci_fmod"
+kind = "x87_2"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIpow"
+host = "dish_ci_pow"
+kind = "x87_2"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIatan2"
+host = "dish_ci_atan2"
+kind = "x87_2"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIsin"
+host = "__builtin_sin"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIcos"
+host = "__builtin_cos"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CItan"
+host = "__builtin_tan"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIasin"
+host = "__builtin_asin"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIacos"
+host = "__builtin_acos"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIatan"
+host = "__builtin_atan"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIsqrt"
+host = "__builtin_sqrt"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIlog"
+host = "__builtin_log"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIlog10"
+host = "__builtin_log10"
+kind = "x87_1"
+[[override]]
+module = "msvcr90.dll"
+export = "_CIexp"
+host = "__builtin_exp"
+kind = "x87_1"
+
+# Statically linked MSVC memcpy/memmove in the PhysX modules (same body as msvcr90's; found by its prologue bytes). The backward-copy
+# path dispatches through `neg ecx; jmp [ecx*4+table]`, a negative-index jump table that discovery does not follow, so the lifted
+# copy trapped at the first overlapping move (New Game, level load). Addresses are at the rebased module bases.
+[[override]]
+module = "PhysXLoader.dll"
+addr = 0x10007b00
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+[[override]]
+module = "PhysXLoader.dll"
+addr = 0x10009470
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037f350
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037f6d0
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x105698f0
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x10569c60
+pop = 0
+host = "ovr_memmove"
+why = "static CRT memcpy/memmove"
+
+# Statically linked _CI* math wrappers in the PhysX modules. They take their operands on the caller's x87 stack, which a lifted
+# function cannot see (the lifted body trapped at its first fxch), so they become the same call-site intrinsics as msvcr90's exports.
+# Identified by comparing their bytes (relocations and call displacements masked) with msvcr90's _CI* exports; rebased addresses.
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037ef30
+host = "__builtin_acos"
+kind = "x87_1"
+why = "static _CIacos"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037f080
+host = "dish_ci_pow"
+kind = "x87_2"
+why = "static _CIpow"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x10380300
+host = "__builtin_asin"
+kind = "x87_1"
+why = "static _CIasin"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x1056b440
+host = "__builtin_acos"
+kind = "x87_1"
+why = "static _CIacos"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x1056b680
+host = "__builtin_asin"
+kind = "x87_1"
+why = "static _CIasin"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x1056b7d0
+host = "dish_ci_pow"
+kind = "x87_2"
+why = "static _CIpow"
+
+# Compiler float->int helpers: they take st0 from the caller, so they are lowered inline at each call site (x87 values live in the
+# caller's locals). Located with tools/analysis/find_ftol.py; PhysX addresses are at the rebased module bases chosen above
+# (preferred-base address + 0x100000 for PhysXCore, + 0x500000 for PhysXCooking).
+[[override]]
+module = "Dishonored.exe"
+addr = 0x00ec3d20
+host = "inline"
+kind = "x87_ftol32"
+why = "_ftol2_sse"
+[[override]]
+module = "Dishonored.exe"
+addr = 0x00ec3d56
+host = "inline"
+kind = "x87_ftol64"
+why = "_ftol2"
+[[override]]
+module = "msvcp90.dll"
+addr = 0x784b9e30
+host = "inline"
+kind = "x87_ftol32"
+why = "_ftol2_sse"
+[[override]]
+module = "msvcp90.dll"
+addr = 0x784b9e66
+host = "inline"
+kind = "x87_ftol64"
+why = "_ftol2"
+[[override]]
+module = "msvcr90.dll"
+export = "_ftol"
+host = "inline"
+kind = "x87_ftol64"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037fd00
+host = "inline"
+kind = "x87_ftol32"
+why = "_ftol2_sse"
+[[override]]
+module = "PhysXCore.dll"
+addr = 0x1037fd36
+host = "inline"
+kind = "x87_ftol64"
+why = "_ftol2"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x1056aad0
+host = "inline"
+kind = "x87_ftol32"
+why = "_ftol2_sse"
+[[override]]
+module = "PhysXCooking.dll"
+addr = 0x1056ab06
+host = "inline"
+kind = "x87_ftol64"
+why = "_ftol2"
+
+# Hooks: replace a guest function by a host symbol (GuestFn signature).
+# (the thread-naming hook at Dishonored.exe 0x416580 was removed: the runtime's RaiseException(0x406D1388) is fixed)

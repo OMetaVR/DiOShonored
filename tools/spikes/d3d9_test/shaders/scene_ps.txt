@@ -1,0 +1,23 @@
+ps_3_0
+dcl_texcoord0 v0
+dcl_color v1
+dcl_texcoord1 v2
+def c2 = 1.50000000e+00, 1.50000000e+00, 1.50000000e+00, 6.00000024e-01
+dcl_2d s1
+dcl_2d s0
+texld r0.xyzw, v0.xyxx, s0
+mul r0.xyzw, r0.xyzw, v1.xyzw
+mul r0.xyzw, r0.xyzw, c0.xyzw
+mov r1.xyzw, r0.xyzw
+if_ne c1.x, -c1.x
+    texld r2.xyzw, v2.xyxx, s1
+    mul r3.xyz, r0.xyzx, r2.xyzx
+    mul r3.xyz, r3.xyzx, c2.xyzx
+    mul r2.x, r2.w, c2.w
+    add r2.yzw, r3.xxyz, -r0.xxyz
+    mul r2.xyz, r2.x, r2.yzwy
+    add r0.xyz, r0.xyzx, r2.xyzx
+    mov r1.xyz, r0.xyzx
+else
+endif
+mov oC0.xyzw, r1.xyzw

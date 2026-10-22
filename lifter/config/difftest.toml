@@ -1,0 +1,58 @@
+# Lifter configuration for Dishonored (Steam, build as installed locally).
+# Addresses, names and hashes only. No game bytes.
+
+# Imports that never return (dll!name, lower-case dll).
+noreturn_imports = [
+  "kernel32.dll!ExitProcess",
+  "kernel32.dll!ExitThread",
+  "kernel32.dll!FatalExit",
+  "kernel32.dll!FatalAppExitA",
+  "kernel32.dll!FatalAppExitW",
+  "msvcr90.dll!exit",
+  "msvcr90.dll!_exit",
+  "msvcr90.dll!abort",
+  "msvcr90.dll!longjmp",
+  "msvcr90.dll!_invoke_watson",
+  "msvcr90.dll!_amsg_exit",
+  "msvcr90.dll!_CxxThrowException",
+  "msvcr90.dll!?terminate@@YAXXZ",
+  "msvcr90.dll!_purecall",
+  "msvcr90.dll!_invalid_parameter_noinfo_noreturn",
+  "msvcr90.dll!_wassert",
+  "msvcr90.dll!_assert",
+  "msvcr90.dll!_local_unwind2",
+]
+
+# Functions (module!export or absolute address) that never return.
+noreturn = [
+  "msvcr90.dll!exit",
+  "msvcr90.dll!_exit",
+  "msvcr90.dll!abort",
+  "msvcr90.dll!longjmp",
+  "msvcr90.dll!_amsg_exit",
+  "msvcr90.dll!_invoke_watson",
+  "msvcr90.dll!_CxxThrowException",
+  "msvcr90.dll!?terminate@@YAXXZ",
+  "msvcr90.dll!_purecall",
+]
+
+
+# Module list. Bases: exe at its preferred base (required by the ABI doc); the CRT DLLs keep their preferred bases
+# (they do not overlap the exe image or the thunk region).
+[[module]]
+name = "msvcr90.dll"
+relpath = "Binaries/Win32/Microsoft.VC90.CRT/msvcr90.dll"
+base = 0x78520000
+
+[[module]]
+name = "msvcp90.dll"
+relpath = "Binaries/Win32/Microsoft.VC90.CRT/msvcp90.dll"
+base = 0x78480000
+
+[[module]]
+name = "Dishonored.exe"
+relpath = "Binaries/Win32/Dishonored.exe"
+base = 0x400000
+
+# Native host-function substitution (hot CRT functions). Host symbols are ovr_<name> with the GuestFn signature
+# (kind = "guestfn"), or double-typed for x87 helpers (kind = "x87_1" / "x87_2"), see docs/lifter.md.

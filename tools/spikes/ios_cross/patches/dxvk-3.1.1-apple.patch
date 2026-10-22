@@ -1,0 +1,389 @@
+diff --git a/meson.build b/meson.build
+index 4964301..1010490 100644
+--- a/meson.build
++++ b/meson.build
+@@ -179,6 +179,10 @@ dxbc_spirv_dep = dxbc_spirv.get_variable('dxbc_spv_dep')
+ 
+ dxvk_include_path = include_directories(dxvk_include_dirs)
+ 
++if get_option('static_d3d9')
++  compiler_args += [ '-DDXVK_STATIC=1' ]
++endif
++
+ add_project_arguments(cpp.get_supported_arguments(compiler_args), language: 'cpp')
+ add_project_arguments(cc.get_supported_arguments(compiler_args), language: 'c')
+ add_project_link_arguments(cpp.get_supported_link_arguments(link_args), language: 'cpp')
+diff --git a/meson_options.txt b/meson_options.txt
+index 98851af..25a79ef 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -7,3 +7,4 @@ option('build_id',     type : 'boolean', value : false)
+ option('native_glfw',  type : 'feature', value : 'auto', description: 'Enable GLFW WSI for DXVK Native')
+ option('native_sdl2',  type : 'feature', value : 'auto', description: 'Enable SDL2 WSI for DXVK Native')
+ option('native_sdl3',  type : 'feature', value : 'auto', description: 'Enable SDL3 WSI for DXVK Native')
++option('static_d3d9', type : 'boolean', value : false, description: 'Build d3d9 as a static library and make the SDL3 WSI / Vulkan loader bind statically (iOS: app links SDL3, DXVK and MoltenVK into one executable)')
+diff --git a/src/d3d10/meson.build b/src/d3d10/meson.build
+index 6a690c4..716adce 100644
+--- a/src/d3d10/meson.build
++++ b/src/d3d10/meson.build
+@@ -10,7 +10,9 @@ d3d10_core_link_depends = []
+ if platform == 'windows'
+   d3d10_d3d11_dep = lib_d3d11
+ else
+-  d3d10_core_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d10core.sym') ]
++  if platform != 'darwin' # Mach-O ld has no --version-script (all symbols stay exported)
++    d3d10_core_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d10core.sym') ]
++  endif
+   d3d10_core_link_depends += files('d3d10core.sym')
+   d3d10_d3d11_dep = d3d11_dep
+ endif
+diff --git a/src/d3d11/meson.build b/src/d3d11/meson.build
+index af2b7b2..005438f 100644
+--- a/src/d3d11/meson.build
++++ b/src/d3d11/meson.build
+@@ -74,7 +74,9 @@ d3d11_link_depends = []
+ if platform == 'windows'
+   d3d11_dxgi_deps = [ lib_gdi32, lib_dxgi ]
+ else
+-  d3d11_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d11.sym') ]
++  if platform != 'darwin' # Mach-O ld has no --version-script (all symbols stay exported)
++    d3d11_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d11.sym') ]
++  endif
+   d3d11_link_depends += files('d3d11.sym')
+   d3d11_dxgi_deps = [ dxgi_dep ]
+ endif
+diff --git a/src/d3d8/meson.build b/src/d3d8/meson.build
+index 19064da..f04dec6 100644
+--- a/src/d3d8/meson.build
++++ b/src/d3d8/meson.build
+@@ -19,7 +19,9 @@ d3d8_link_depends = []
+ 
+ if platform != 'windows'
+   lib_d3d9 = d3d9_dep
+-  d3d8_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d8.sym') ]
++  if platform != 'darwin' # Mach-O ld has no --version-script (all symbols stay exported)
++    d3d8_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d8.sym') ]
++  endif
+   d3d8_link_depends += files('d3d8.sym')
+ endif
+ 
+diff --git a/src/d3d9/meson.build b/src/d3d9/meson.build
+index 53d23a6..4823bea 100644
+--- a/src/d3d9/meson.build
++++ b/src/d3d9/meson.build
+@@ -56,19 +56,30 @@ d3d9_ld_args      = []
+ d3d9_link_depends = []
+ 
+ if platform != 'windows'
+-  d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
++  if platform != 'darwin' # Mach-O ld has no --version-script (all symbols stay exported)
++    d3d9_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'd3d9.sym') ]
++  endif
+   d3d9_link_depends += files('d3d9.sym')
+ endif
+ 
+-d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
+-  dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
+-  include_directories : dxvk_include_path,
+-  install             : true,
+-  vs_module_defs      : 'd3d9'+def_spec_ext,
+-  link_args           : d3d9_ld_args,
+-  link_depends        : [ d3d9_link_depends ],
+-  kwargs              : dxvk_so_version,
+-)
++if get_option('static_d3d9')
++  # one archive; the internal static libraries (libdxvk.a, libutil.a, libwsi.a ...) are collected by the build script
++  d3d9_dll = static_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
++    dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
++    include_directories : dxvk_include_path,
++    install             : true,
++  )
++else
++  d3d9_dll = shared_library(dxvk_name_prefix+'d3d9', d3d9_src, glsl_generator.process(d3d9_shaders), d3d9_res,
++    dependencies        : [ dxbc_spirv_dep, dxvk_dep ],
++    include_directories : dxvk_include_path,
++    install             : true,
++    vs_module_defs      : 'd3d9'+def_spec_ext,
++    link_args           : d3d9_ld_args,
++    link_depends        : [ d3d9_link_depends ],
++    kwargs              : dxvk_so_version,
++  )
++endif
+ 
+ d3d9_dep = declare_dependency(
+   link_with           : [ d3d9_dll ],
+diff --git a/src/dxgi/meson.build b/src/dxgi/meson.build
+index a9ed5e7..554c372 100644
+--- a/src/dxgi/meson.build
++++ b/src/dxgi/meson.build
+@@ -20,7 +20,9 @@ dxgi_extra_dep    = []
+ if platform == 'windows'
+   dxgi_extra_dep    += [ cpp.find_library('version') ]
+ else
+-  dxgi_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'dxgi.sym') ]
++  if platform != 'darwin' # Mach-O ld has no --version-script (all symbols stay exported)
++    dxgi_ld_args      += [ '-Wl,--version-script', join_paths(meson.current_source_dir(), 'dxgi.sym') ]
++  endif
+   dxgi_link_depends += files('dxgi.sym')
+ endif
+ 
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index 63d89d9..52b1abb 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -753,6 +753,8 @@ namespace dxvk {
+     if (m_queueMapping.graphics.family == VK_QUEUE_FAMILY_IGNORED)
+       return std::string("Device does not have a graphics queue");
+ 
++    /* iOS bring-up: report every missing required feature at once instead of only the first */
++    std::string missing;
+     for (const auto& f : getFeatureList()) {
+       if (f.featureRequired && !(*f.featureEnabled)) {
+         std::string message = str::format("Device does not support required feature '", f.readableName, "'");
+@@ -760,10 +762,13 @@ namespace dxvk {
+         if (f.extensionEnabled)
+           message += str::format(" (extension: ", f.extensionEnabled->extensionName, ")");
+ 
+-        return message;
++        missing += missing.empty() ? message : str::format("; ", message);
+       }
+     }
+ 
++    if (!missing.empty())
++      return missing;
++
+     if (!m_featuresEnabled.extDescriptorHeap.descriptorHeap && m_properties.core.properties.limits.maxPushConstantsSize < MaxTotalPushDataSize)
+       return str::format("Device does not support ", MaxTotalPushDataSize, " of push data");
+ 
+@@ -822,6 +827,16 @@ namespace dxvk {
+         &m_featuresEnabled.ext.name,                      \
+         require, #name }
+ 
++    /* EXPERIMENTAL (iOS/MoltenVK): MoltenVK never reports geometryShader / shaderCullDistance /
++     * VK_EXT_depth_clip_enable, and textureCompressionBC only if the Metal device has native BC (A-series: no).
++     * Upstream hard-requires all four, so vkCreateDevice can never succeed on iOS. Downgrading them to optional
++     * lets device creation proceed; code paths that need them are untested on MoltenVK. */
++#ifdef __APPLE__
++    constexpr bool reqMvk = false;
++#else
++    constexpr bool reqMvk = true;
++#endif
++
+     return {{
+       ENABLE_FEATURE(core.features, depthBiasClamp, true),
+       ENABLE_FEATURE(core.features, depthBounds, false),
+@@ -831,7 +846,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, fillModeNonSolid, true),
+       ENABLE_FEATURE(core.features, fragmentStoresAndAtomics, true),
+       ENABLE_FEATURE(core.features, fullDrawIndexUint32, true),
+-      ENABLE_FEATURE(core.features, geometryShader, true),
++      ENABLE_FEATURE(core.features, geometryShader, reqMvk),
+       ENABLE_FEATURE(core.features, imageCubeArray, true),
+       ENABLE_FEATURE(core.features, independentBlend, true),
+       ENABLE_FEATURE(core.features, largePoints, false),
+@@ -844,7 +859,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, sampleRateShading, true),
+       ENABLE_FEATURE(core.features, samplerAnisotropy, true),
+       ENABLE_FEATURE(core.features, shaderClipDistance, true),
+-      ENABLE_FEATURE(core.features, shaderCullDistance, true),
++      ENABLE_FEATURE(core.features, shaderCullDistance, reqMvk),
+       ENABLE_FEATURE(core.features, shaderFloat64, false),
+       ENABLE_FEATURE(core.features, shaderImageGatherExtended, true),
+       ENABLE_FEATURE(core.features, shaderInt16, true),
+@@ -865,7 +880,7 @@ namespace dxvk {
+       ENABLE_FEATURE(core.features, shaderResourceResidency, false),
+       ENABLE_FEATURE(core.features, shaderResourceMinLod, false),
+       ENABLE_FEATURE(core.features, tessellationShader, false),
+-      ENABLE_FEATURE(core.features, textureCompressionBC, true),
++      ENABLE_FEATURE(core.features, textureCompressionBC, reqMvk),
+       ENABLE_FEATURE(core.features, variableMultisampleRate, false),
+       ENABLE_FEATURE(core.features, vertexPipelineStoresAndAtomics, false),
+       ENABLE_FEATURE(core.features, wideLines, false),
+@@ -929,7 +944,7 @@ namespace dxvk {
+       ENABLE_EXT_FEATURE(extCustomBorderColor, customBorderColorWithoutFormat, false),
+ 
+       /* Depth clip matches D3D semantics where depth clamp does not */
+-      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, true),
++      ENABLE_EXT_FEATURE(extDepthClipEnable, depthClipEnable, reqMvk),
+ 
+       /* Controls depth bias behaviour with emulated depth formats */
+       ENABLE_EXT_FEATURE(extDepthBiasControl, depthBiasControl, false),
+diff --git a/src/util/util_env.cpp b/src/util/util_env.cpp
+index 556327c..3944c46 100644
+--- a/src/util/util_env.cpp
++++ b/src/util/util_env.cpp
+@@ -10,6 +10,11 @@
+ #include <sys/sysctl.h>
+ #include <unistd.h>
+ #include <limits.h>
++#elif defined(__APPLE__)
++#include <mach-o/dyld.h>
++#include <pthread.h>
++#include <unistd.h>
++#include <limits.h>
+ #endif
+ 
+ #include "util_env.h"
+@@ -112,6 +117,14 @@ namespace dxvk::env {
+         return "";
+     }
+ 
++    return std::string(exePath);
++#elif defined(__APPLE__)
++    char exePath[PATH_MAX] = {};
++    uint32_t size = sizeof(exePath);
++
++    if (_NSGetExecutablePath(exePath, &size) != 0)
++      return "";
++
+     return std::string(exePath);
+ #endif
+   }
+@@ -136,7 +149,12 @@ namespace dxvk::env {
+ #else
+     std::array<char, 16> posixName = {};
+     dxvk::str::strlcpy(posixName.data(), name.c_str(), 16);
++#ifdef __APPLE__
++    // Darwin can only name the calling thread
++    ::pthread_setname_np(posixName.data());
++#else
+     ::pthread_setname_np(pthread_self(), posixName.data());
++#endif
+ #endif
+   }
+ 
+diff --git a/src/util/util_math.h b/src/util/util_math.h
+index 9276d93..a712940 100644
+--- a/src/util/util_math.h
++++ b/src/util/util_math.h
+@@ -1,6 +1,7 @@
+ #pragma once
+ 
+ #include <cmath>
++#include <cstddef>
+ 
+ namespace dxvk {
+   
+diff --git a/src/util/util_win32_compat.h b/src/util/util_win32_compat.h
+index b706dca..7a4b4a1 100644
+--- a/src/util/util_win32_compat.h
++++ b/src/util/util_win32_compat.h
+@@ -1,6 +1,6 @@
+ #pragma once
+ 
+-#if defined(__unix__)
++#if defined(__unix__) || defined(__APPLE__)
+ 
+ #include <windows.h>
+ #include <dlfcn.h>
+diff --git a/src/vulkan/vulkan_loader.cpp b/src/vulkan/vulkan_loader.cpp
+index f9d1e98..ad44ac4 100644
+--- a/src/vulkan/vulkan_loader.cpp
++++ b/src/vulkan/vulkan_loader.cpp
+@@ -1,27 +1,63 @@
++#include <string>
+ #include <tuple>
++#include <vector>
+ 
+ #include "vulkan_loader.h"
+ 
+ #include "../util/log/log.h"
+ 
++#include "../util/util_env.h"
+ #include "../util/util_string.h"
+ #include "../util/util_win32_compat.h"
+ 
+ namespace dxvk::vk {
+ 
++#if defined(DXVK_STATIC)
++  // libMoltenVK.a is linked into the executable
++  extern "C" PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName);
++#endif
++
+   static std::pair<HMODULE, PFN_vkGetInstanceProcAddr> loadVulkanLibrary() {
+-    static const std::array<const char*, 2> dllNames = {{
++    std::vector<std::string> dllNames;
++
+ #ifdef _WIN32
+-      "winevulkan.dll",
+-      "vulkan-1.dll",
++    dllNames = { "winevulkan.dll", "vulkan-1.dll" };
++#elif defined(__APPLE__)
++    // iOS/macOS: dlopen() only resolves paths inside the app bundle. An explicit override comes
++    // first (an app hosted by LiveContainer can compute an absolute path from its NSBundle),
++    // then the conventional embedded locations of MoltenVK.
++    {
++      std::string override = env::getEnvVar("DXVK_VULKAN_LIBRARY");
++      if (!override.empty())
++        dllNames.push_back(override);
++    }
++    dllNames.push_back("@executable_path/Frameworks/MoltenVK.framework/MoltenVK");
++    dllNames.push_back("@rpath/MoltenVK.framework/MoltenVK");
++    dllNames.push_back("@executable_path/Frameworks/libMoltenVK.dylib");
++    dllNames.push_back("libMoltenVK.dylib");
++    dllNames.push_back("libvulkan.1.dylib");
++    dllNames.push_back("libvulkan.dylib");
+ #else
+-      "libvulkan.so",
+-      "libvulkan.so.1",
++    dllNames = { "libvulkan.so", "libvulkan.so.1" };
++#endif
++
++#if defined(DXVK_STATIC)
++    // The statically linked Vulkan implementation is the default; an explicit DXVK_VULKAN_LIBRARY (first entry, only
++    // present when the variable is set) still gets tried first.
++    {
++      std::string override = env::getEnvVar("DXVK_VULKAN_LIBRARY");
++      dllNames.clear();
++      if (!override.empty())
++        dllNames.push_back(override);
++      else {
++        Logger::info("Vulkan: using the statically linked vkGetInstanceProcAddr");
++        return std::make_pair(HMODULE(nullptr), PFN_vkGetInstanceProcAddr(&vkGetInstanceProcAddr));
++      }
++    }
+ #endif
+-    }};
+ 
+-    for (auto dllName : dllNames) {
+-      HMODULE library = LoadLibraryA(dllName);
++    for (const auto& dllName : dllNames) {
++      HMODULE library = LoadLibraryA(dllName.c_str());
+ 
+       if (!library)
+         continue;
+diff --git a/src/wsi/sdl3/wsi_platform_sdl3.cpp b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+index 9975cda..0e2e07b 100644
+--- a/src/wsi/sdl3/wsi_platform_sdl3.cpp
++++ b/src/wsi/sdl3/wsi_platform_sdl3.cpp
+@@ -10,6 +10,12 @@
+ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::Sdl3WsiDriver() {
++#if defined(DXVK_STATIC)
++    // SDL3 is linked into the same executable: bind the function table directly, no LoadLibrary.
++    libsdl = nullptr;
++    #define SDL_PROC(ret, name, params) name = ::name;
++    #include "wsi_platform_sdl3_funcs.h"
++#else
+     libsdl = LoadLibraryA( // FIXME: Get soname as string from meson
+ #if defined(_WIN32)
+         "SDL3.dll"
+@@ -30,6 +36,7 @@ namespace dxvk::wsi {
+         throw DxvkError("SDL3 WSI: Failed to load " #name "."); \
+       }
+     #include "wsi_platform_sdl3_funcs.h"
++#endif
+ 
+     if (!SDL_InitSubSystem(SDL_INIT_VIDEO))
+       throw DxvkError("SDL3 WSI: Failed to initialize video subsystem."); \
+@@ -37,7 +44,8 @@ namespace dxvk::wsi {
+ 
+   Sdl3WsiDriver::~Sdl3WsiDriver() {
+     SDL_QuitSubSystem(SDL_INIT_VIDEO);
+-    FreeLibrary(libsdl);
++    if (libsdl)
++      FreeLibrary(libsdl);
+   }
+ 
+   std::vector<const char *> Sdl3WsiDriver::getInstanceExtensions() {

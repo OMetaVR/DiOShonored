@@ -1,0 +1,86 @@
+# Manual signatures for imports that no Wine .spec describes (stub DLLs) or where the spec is unusable.
+# Format: dll<TAB>name<TAB>conv<TAB>argbytes<TAB>default_ret[<TAB>note]
+#   conv: S = stdcall (callee pops argbytes), C = cdecl (pops nothing), V = cdecl varargs
+#   default_ret: value placed in eax by an auto-generated stub (decimal or 0x hex)
+# Entries marked "unverified" were written from memory of the public headers; check against the call sites
+# in the lifted code before relying on them.
+steam_api.dll	SteamAPI_Init	C	0	1	returns bool true
+steam_api.dll	SteamAPI_Shutdown	C	0	0
+steam_api.dll	SteamAPI_RunCallbacks	C	0	0
+steam_api.dll	SteamAPI_RegisterCallback	C	8	0	(CCallbackBase*, int)
+steam_api.dll	SteamAPI_UnregisterCallback	C	4	0	(CCallbackBase*)
+steam_api.dll	SteamAPI_RegisterCallResult	C	8	0	(CCallbackBase*, uint64) -> 12 bytes; see note below
+steam_api.dll	SteamAPI_UnregisterCallResult	C	8	0
+steam_api.dll	SteamApps	C	0	0	returns interface ptr (stub: NULL)
+steam_api.dll	SteamFriends	C	0	0
+steam_api.dll	SteamGameServer	C	0	0
+steam_api.dll	SteamGameServer_Shutdown	C	0	0
+steam_api.dll	SteamMatchmaking	C	0	0
+steam_api.dll	SteamMatchmakingServers	C	0	0
+steam_api.dll	SteamNetworking	C	0	0
+steam_api.dll	SteamRemoteStorage	C	0	0
+steam_api.dll	SteamUser	C	0	0
+steam_api.dll	SteamUserStats	C	0	0
+steam_api.dll	SteamUtils	C	0	0
+libcurl.dll	curl_global_init	C	4	0
+libcurl.dll	curl_global_cleanup	C	0	0
+libcurl.dll	curl_easy_init	C	0	0	NULL: caller must treat as failure
+libcurl.dll	curl_easy_setopt	V	0	0	varargs
+libcurl.dll	curl_easy_perform	C	4	7	CURLE_COULDNT_CONNECT
+libcurl.dll	curl_easy_cleanup	C	4	0
+libcurl.dll	curl_slist_append	C	8	0
+dbghelp.dll	SymInitialize	S	12	0
+dbghelp.dll	SymSetOptions	S	4	0
+dbghelp.dll	SymGetOptions	S	0	0
+dbghelp.dll	SymSetSearchPathW	S	8	0
+dbghelp.dll	SymLoadModule64	S	28	0
+dbghelp.dll	SymGetModuleBase64	S	12	0
+dbghelp.dll	SymGetModuleInfo64	S	16	0
+dbghelp.dll	SymFunctionTableAccess64	S	12	0
+dbghelp.dll	SymGetSymFromAddr64	S	20	0
+dbghelp.dll	SymGetLineFromAddr64	S	20	0
+dbghelp.dll	StackWalk64	S	36	0
+dbghelp.dll	MiniDumpWriteDump	S	28	0
+faultrep.dll	ReportFault	S	8	0
+# cudart 3.0 on Windows is __stdcall (CUDARTAPI). Arg counts from cuda_runtime_api.h, checked against the PhysXCore call sites (push counts, no caller cleanup).
+# default_ret 38 = cudaErrorNoDevice.
+cudart32_30_9.dll	__cudaRegisterFatBinary	S	4	0
+cudart32_30_9.dll	__cudaUnregisterFatBinary	S	4	0
+cudart32_30_9.dll	__cudaRegisterFunction	S	40	0	verified: 10 pushes at all 92 PhysXCore call sites, no caller cleanup
+cudart32_30_9.dll	__cudaRegisterVar	S	32	0	verified (8 pushes)
+cudart32_30_9.dll	__cudaRegisterShared	S	8	0	verified (2 pushes)
+cudart32_30_9.dll	__cudaRegisterTexture	S	28	0	verified (7 pushes)
+cudart32_30_9.dll	cudaGetDeviceProperties	S	8	38
+cudart32_30_9.dll	cudaGetErrorString	S	4	0
+cudart32_30_9.dll	cudaGetLastError	S	0	38
+cudart32_30_9.dll	cudaMalloc	S	8	38
+cudart32_30_9.dll	cudaFree	S	4	38
+cudart32_30_9.dll	cudaMallocHost	S	8	38
+cudart32_30_9.dll	cudaFreeHost	S	4	38
+cudart32_30_9.dll	cudaMemcpy	S	16	38
+cudart32_30_9.dll	cudaMemcpyAsync	S	20	38
+cudart32_30_9.dll	cudaMemcpyToSymbolAsync	S	24	38	unverified
+cudart32_30_9.dll	cudaBindTexture	S	20	38	unverified
+cudart32_30_9.dll	cudaConfigureCall	S	32	38	(dim3 gridDim, dim3 blockDim, size_t sharedMem, cudaStream_t): 12 + 12 + 4 + 4
+cudart32_30_9.dll	cudaLaunch	S	4	38
+cudart32_30_9.dll	cudaCreateChannelDesc	S	24	0	unverified; returns struct by hidden pointer
+cudart32_30_9.dll	cudaEventCreate	S	4	38
+cudart32_30_9.dll	cudaEventElapsedTime	S	12	38
+cudart32_30_9.dll	cudaEventQuery	S	4	38
+cudart32_30_9.dll	cudaEventRecord	S	8	38
+cudart32_30_9.dll	cudaEventSynchronize	S	4	38
+xinput1_3.dll	ord2	S	8	0x48f	XInputGetState: ERROR_DEVICE_NOT_CONNECTED
+xinput1_3.dll	ord3	S	8	0x48f	XInputSetState
+cudart32_30_9.dll	cudaMemset	S	12	38
+cudart32_30_9.dll	cudaSetupArgument	S	12	38
+cudart32_30_9.dll	cudaStreamCreate	S	4	38
+cudart32_30_9.dll	cudaStreamDestroy	S	4	38
+cudart32_30_9.dll	cudaThreadSynchronize	S	0	38
+cudart32_30_9.dll	cudaUnbindTexture	S	4	38
+msvcr90.dll	memcpy	C	0	0
+msvcr90.dll	memmove	C	0	0
+msvcr90.dll	memset	C	0	0
+msvcr80.dll	memcpy	C	0	0
+msvcr80.dll	memmove	C	0	0
+msvcr80.dll	memset	C	0	0
+msvcr90.dll	_invoke_watson	C	0	0

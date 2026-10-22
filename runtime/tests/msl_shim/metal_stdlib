@@ -1,0 +1,109 @@
+// A tiny C++ stand-in for the parts of Metal's standard library that MojoShader's Metal profile emits. It is NOT Metal: it exists so the
+// generated MSL can be type-checked (clang -fsyntax-only) on machines without Apple's Metal compiler (Linux CI). Semantics are approximate.
+#pragma once
+#include <cfloat>
+#include <cmath>
+#include <cstdint>
+#include <type_traits>
+
+#define vertex
+#define fragment
+#define constant
+#define device
+#define thread
+#define threadgroup
+
+typedef unsigned int uint;
+typedef float float2 __attribute__((ext_vector_type(2)));
+typedef float float3 __attribute__((ext_vector_type(3)));
+typedef float float4 __attribute__((ext_vector_type(4)));
+typedef int int2 __attribute__((ext_vector_type(2)));
+typedef int int3 __attribute__((ext_vector_type(3)));
+typedef int int4 __attribute__((ext_vector_type(4)));
+typedef unsigned int uint2 __attribute__((ext_vector_type(2)));
+typedef unsigned int uint3 __attribute__((ext_vector_type(3)));
+typedef unsigned int uint4 __attribute__((ext_vector_type(4)));
+typedef bool bool2 __attribute__((ext_vector_type(2)));
+typedef bool bool3 __attribute__((ext_vector_type(3)));
+typedef bool bool4 __attribute__((ext_vector_type(4)));
+
+namespace metal {
+struct sampler {};
+struct bias { float v; explicit bias(float x) : v(x) {} };
+struct level { float v; explicit level(float x) : v(x) {} };
+struct gradient2d { float2 dx, dy; gradient2d(float2 a, float2 b) : dx(a), dy(b) {} };
+struct gradient3d { float3 dx, dy; gradient3d(float3 a, float3 b) : dx(a), dy(b) {} };
+struct gradientcube { float3 dx, dy; gradientcube(float3 a, float3 b) : dx(a), dy(b) {} };
+
+template <class T> struct texture2d {
+    float4 sample(sampler, float2) const { return (float4)0.0f; }
+    float4 sample(sampler, float2, bias) const { return (float4)0.0f; }
+    float4 sample(sampler, float2, level) const { return (float4)0.0f; }
+    float4 sample(sampler, float2, gradient2d) const { return (float4)0.0f; }
+};
+template <class T> struct texturecube {
+    float4 sample(sampler, float3) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, bias) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, level) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, gradientcube) const { return (float4)0.0f; }
+};
+template <class T> struct texture3d {
+    float4 sample(sampler, float3) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, bias) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, level) const { return (float4)0.0f; }
+    float4 sample(sampler, float3, gradient3d) const { return (float4)0.0f; }
+};
+inline void discard_fragment() {}
+
+#define DISH_V1(name, expr) \
+    template <class T> inline T name(T x) { return expr; }
+template <class T> inline T abs(T x) { return __builtin_elementwise_abs(x); }
+template <class T> inline T sin(T x) { return __builtin_elementwise_sin(x); }
+template <class T> inline T cos(T x) { return __builtin_elementwise_cos(x); }
+template <class T> inline T floor(T x) { return __builtin_elementwise_floor(x); }
+template <class T> inline T ceil(T x) { return __builtin_elementwise_ceil(x); }
+template <class T> inline T fract(T x) { return x - __builtin_elementwise_floor(x); }
+template <class T> inline T exp2(T x) { return __builtin_elementwise_exp2(x); }
+template <class T> inline T log2(T x) { return __builtin_elementwise_log2(x); }
+template <class T> inline T sqrt(T x) { return __builtin_elementwise_sqrt(x); }
+template <class T> inline T rsqrt(T x) { return 1.0f / __builtin_elementwise_sqrt(x); }
+template <class T> inline T sign(T x) { return (x > 0) - (x < 0); }
+template <class T> inline T min(T a, T b) { return __builtin_elementwise_min(a, b); }
+template <class T> inline T max(T a, T b) { return __builtin_elementwise_max(a, b); }
+template <class T> inline T clamp(T x, T lo, T hi) { return __builtin_elementwise_min(__builtin_elementwise_max(x, lo), hi); }
+template <class T> inline T clamp(T x, float lo, float hi) { return __builtin_elementwise_min(__builtin_elementwise_max(x, (T)lo), (T)hi); }
+template <class T> inline T saturate(T x) { return clamp(x, (T)0, (T)1); }
+template <class T> inline T pow(T a, T b) { return __builtin_elementwise_pow(a, b); }
+template <class T> inline T mix(T a, T b, T t) { return a + (b - a) * t; }
+template <class T> inline T dfdx(T) { return T(0); }
+template <class T> inline T dfdy(T) { return T(0); }
+template <class T> inline T step(T edge, T x) { return (T)(x >= edge) ; }
+template <class T> inline T normalize(T v) { return v; }
+inline float dot(float a, float b) { return a * b; }
+template <class T> inline float dot(T a, T b) { T m = a * b; float s = 0; for (unsigned i = 0; i < __builtin_vectorelements(T); i++) s += m[i]; return s; }
+template <class T> inline float length(T v) { return sqrt(dot(v, v)); }
+inline float3 cross(float3 a, float3 b) { float3 r; r.x = a.y * b.z - a.z * b.y; r.y = a.z * b.x - a.x * b.z; r.z = a.x * b.y - a.y * b.x; return r; }
+template <class T> inline bool any(T v) { for (unsigned i = 0; i < __builtin_vectorelements(T); i++) if (v[i]) return true; return false; }
+inline bool any(bool v) { return v; }
+template <class T> inline bool all(T v) { for (unsigned i = 0; i < __builtin_vectorelements(T); i++) if (!v[i]) return false; return true; }
+}  // namespace metal
+
+// Functional-style vector construction (MSL: float4(a, b, c, d), float4(v.xyz, w), float4(s) ...). Defined last so the shim itself can use the types.
+template <class V, class S> inline void dish_put(V &r, int &k, S s) {
+    if constexpr (std::is_arithmetic<S>::value) { r[k++] = (std::remove_reference_t<decltype(r[0])>)s; }
+    else { for (unsigned i = 0; i < __builtin_vectorelements(S); i++) r[k++] = (std::remove_reference_t<decltype(r[0])>)s[i]; }
+}
+template <class V, class... A> inline V dish_make(A... a) {
+    V r{};
+    int k = 0;
+    (dish_put(r, k, a), ...);
+    if (sizeof...(A) == 1 && k == 1) for (unsigned i = 1; i < __builtin_vectorelements(V); i++) r[i] = r[0];
+    return r;
+}
+#define float2(...) dish_make<float2>(__VA_ARGS__)
+#define float3(...) dish_make<float3>(__VA_ARGS__)
+#define float4(...) dish_make<float4>(__VA_ARGS__)
+#define int2(...) dish_make<int2>(__VA_ARGS__)
+#define int3(...) dish_make<int3>(__VA_ARGS__)
+#define int4(...) dish_make<int4>(__VA_ARGS__)
+#define bool4(...) dish_make<bool4>(__VA_ARGS__)

@@ -1,0 +1,27 @@
+# Never commit game-derived material (anti-piracy policy)
+/private/
+/gamefiles/
+/generated/
+*.exe
+*.dll
+*.upk
+*.pck
+*.bik
+*.ipa
+# build / third-party checkouts
+/build/
+/third_party/
+*.o
+*.a
+/tools/.venv/
+# local logs, caches, internal notes, and analysis outputs derived from the game binary
+fault.log
+unresolved.log
+__pycache__/
+*.pyc
+/tools/analysis/out/
+/docs/HANDOFF.md
+/ios/probe/.build/
+/ios/probe/.bsp/
+/ios/probe/xtool/
+/lifter/target/

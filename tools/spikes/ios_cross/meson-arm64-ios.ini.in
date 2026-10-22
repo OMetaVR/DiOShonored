@@ -1,0 +1,36 @@
+# Meson cross file: DXVK (native/SDL3 WSI) for arm64-apple-ios, built on Linux with clang + ld64.lld.
+# @IOS_SDK@, @IOS_MIN@, @SHIM_DIR@ are substituted by build_dxvk_ios.sh. On a Mac with Xcode, delete the
+# --target/-isysroot/-fuse-ld lines, set sysroot with `xcrun --sdk iphoneos --show-sdk-path`, use `clang`.
+#
+# Reference: Generals iOS port (PORTING_PLAYBOOK.md) used the same layout: system='darwin', arm64,
+# sysroot + min-version in built-in options, SDL3 via PKG_CONFIG_PATH (else meson silently falls back to SDL2).
+[binaries]
+c = 'clang'
+cpp = 'clang++'
+ar = 'llvm-ar'
+strip = 'llvm-strip'
+ranlib = 'llvm-ranlib'
+pkg-config = 'pkg-config'
+
+[properties]
+needs_exe_wrapper = true
+# keep host (Linux) pkg-config dirs out of a cross build.
+# NOTE: --target must also be in *_link_args: meson probes the linker with link args only, and without
+# it detects the host ELF ld.lld instead of ld64.lld and emits GNU flags (--start-group, -soname).
+pkg_config_libdir = '@SDL3_PKGCONFIG@'
+
+[built-in options]
+c_args   = ['--target=arm64-apple-ios@IOS_MIN@', '-isysroot', '@IOS_SDK@', '-mios-version-min=@IOS_MIN@']
+# -nostdinc++ + the SDK's libc++ headers: the host LLVM's (newer) libc++ headers reference symbols such as
+# std::__hash_memory that the SDK's libc++.dylib does not export -> undefined symbols at link/load time.
+cpp_args = ['--target=arm64-apple-ios@IOS_MIN@', '-isysroot', '@IOS_SDK@', '-mios-version-min=@IOS_MIN@', '-nostdinc++', '-isystem', '@IOS_SDK@/usr/include/c++/v1']
+c_link_args   = ['--target=arm64-apple-ios@IOS_MIN@', '-B@SHIM_DIR@/ldbin', '-fuse-ld=lld', '-isysroot', '@IOS_SDK@', '-miphoneos-version-min=@IOS_MIN@', '-L@SHIM_DIR@', '-lclang_rt_shim']
+cpp_link_args = ['--target=arm64-apple-ios@IOS_MIN@', '-B@SHIM_DIR@/ldbin', '-fuse-ld=lld', '-isysroot', '@IOS_SDK@', '-miphoneos-version-min=@IOS_MIN@', '-L@SHIM_DIR@', '-lclang_rt_shim']
+
+[host_machine]
+system = 'darwin'
+subsystem = 'ios'
+kernel = 'xnu'
+cpu_family = 'aarch64'
+cpu = 'arm64'
+endian = 'little'

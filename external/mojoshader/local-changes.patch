@@ -1,0 +1,88 @@
+--- a/profiles/mojoshader_profile_metal.c	2026-10-21 17:56:02.655139836 -0400
++++ b/profiles/mojoshader_profile_metal.c	2026-10-21 18:15:50.388545400 -0400
+@@ -764,7 +764,7 @@
+ 
+         // !!! FIXME: might trigger unused var warnings in Clang.
+         //output_line(ctx, "constant %s &%s = %s[%d];", utype, varname, name, index);
+-        output_line(ctx, "#define %s %s[%d];", varname, name, index);
++        output_line(ctx, "#define %s %s[%d]", varname, name, index);   // LOCAL CHANGE (dish): upstream had a stray ';' inside the define
+         push_output(ctx, &ctx->mainline);
+         ctx->indent++;
+         output_line(ctx, "#undef %s", varname);  // !!! FIXME: gross.
+@@ -920,8 +920,11 @@
+                     break;
+                 case MOJOSHADER_USAGE_NORMAL:
+                     output_line(ctx, "float4 %s [[user(normal)]];", var);
++                    break;
+                 default:
+-                    // !!! FIXME: we need to deal with some more built-in varyings here.
++                    // LOCAL CHANGE (dish): any other vs_3_0 output semantic becomes a generic interpolant named after usage and index,
++                    // matching the pixel-shader input below
++                    output_line(ctx, "float4 %s [[user(usage%d_%d)]];", var, (int) usage, (int) index);
+                     break;
+             } // switch
+ 
+@@ -1028,6 +1031,9 @@
+ 
+                 else if (usage == MOJOSHADER_USAGE_NORMAL)
+                     output_line(ctx, "float4 %s [[user(normal)]];", var);
++
++                else  // LOCAL CHANGE (dish): see the vertex-output default case
++                    output_line(ctx, "float4 %s [[user(usage%d_%d)]];", var, (int) usage, (int) index);
+             } // else
+ 
+             pop_output(ctx);
+@@ -1679,7 +1685,7 @@
+     output_line(ctx, "if (any(%s.xyz < float3(0.0))) discard_fragment();", dst);
+ } // emit_METAL_TEXKILL
+ 
+-static void metal_texld(Context *ctx, const int texldd)
++static void metal_texld(Context *ctx, const int texldd, const int texldl)
+ {
+     ctx->metal_need_header_texture = 1;
+     if (!shader_version_atleast(ctx, 1, 4))
+@@ -1762,7 +1768,13 @@
+         const char *biasleft = "";
+         const char *biasright = "";
+         char bias[64] = { '\0' };
+-        if (ctx->instruction_controls == CONTROL_TEXLDB)
++        if (texldl)   // LOCAL CHANGE (dish): TEXLDL carries the explicit LOD in the w component of the coordinate; required in vertex shaders
++        {
++            biasleft = ", level(";
++            make_METAL_srcarg_string_w(ctx, 0, bias, sizeof (bias));
++            biasright = ")";
++        } // if
++        else if (ctx->instruction_controls == CONTROL_TEXLDB)
+         {
+             biasleft = ", bias(";
+             make_METAL_srcarg_string_w(ctx, 0, bias, sizeof (bias));
+@@ -1823,7 +1835,7 @@
+ 
+ void emit_METAL_TEXLD(Context *ctx)
+ {
+-    metal_texld(ctx, 0);
++    metal_texld(ctx, 0, 0);
+ } // emit_METAL_TEXLD
+     
+ 
+@@ -2275,7 +2287,7 @@
+ 
+ void emit_METAL_TEXLDD(Context *ctx)
+ {
+-    metal_texld(ctx, 1);
++    metal_texld(ctx, 1, 0);
+ } // emit_METAL_TEXLDD
+ 
+ void emit_METAL_SETP(Context *ctx)
+@@ -2297,10 +2309,7 @@
+ 
+ void emit_METAL_TEXLDL(Context *ctx)
+ {
+-    // !!! FIXME: The spec says we can't use GLSL's texture*Lod() built-ins
+-    // !!! FIXME:  from fragment shaders for some inexplicable reason.
+-    // !!! FIXME:  Maybe Metal can do it, but I haven't looked into it yet.
+-    emit_METAL_TEXLD(ctx);
++    metal_texld(ctx, 0, 1);   // LOCAL CHANGE (dish): was emit_METAL_TEXLD(ctx), which dropped the LOD
+ } // emit_METAL_TEXLDL
+ 
+ void emit_METAL_BREAKP(Context *ctx)

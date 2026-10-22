@@ -1,0 +1,31 @@
+diff --git a/src/video/uikit/SDL_uikitvulkan.m b/src/video/uikit/SDL_uikitvulkan.m
+index b156219..f61ecd3 100644
+--- a/src/video/uikit/SDL_uikitvulkan.m
++++ b/src/video/uikit/SDL_uikitvulkan.m
+@@ -40,6 +40,10 @@ const char *defaultPaths[] = {
+     "libvulkan.dylib",
+ };
+ 
++#ifdef SDL_VULKAN_STATIC_MOLTENVK
++extern PFN_vkVoidFunction dish_static_vkGetInstanceProcAddr(VkInstance instance, const char *name) __asm("_vkGetInstanceProcAddr");
++#endif
++
+ /* Since libSDL is static, could use RTLD_SELF. Using RTLD_DEFAULT is future
+  * proofing. */
+ #define DEFAULT_HANDLE RTLD_DEFAULT
+@@ -64,9 +68,15 @@ bool UIKit_Vulkan_LoadLibrary(SDL_VideoDevice *_this, const char *path)
+ 
+     if (!path) {
+         // Handle the case where Vulkan Portability is linked statically.
++#ifdef SDL_VULKAN_STATIC_MOLTENVK
++        // The app links libMoltenVK.a into the same executable: reference the symbol directly. dlsym(RTLD_DEFAULT)
++        // cannot see it when the executable is itself loaded with RTLD_LOCAL (LiveContainer turns it into a dylib).
++        vkGetInstanceProcAddr = (PFN_vkGetInstanceProcAddr)dish_static_vkGetInstanceProcAddr;
++#else
+         vkGetInstanceProcAddr =
+             (PFN_vkGetInstanceProcAddr)dlsym(DEFAULT_HANDLE,
+                                              "vkGetInstanceProcAddr");
++#endif
+     }
+ 
+     if (vkGetInstanceProcAddr) {

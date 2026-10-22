@@ -1,0 +1,14 @@
+[package]
+name = "lift"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ir = { path = "../ir" }
+iced-x86.workspace = true
+rayon.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+sha2.workspace = true
+anyhow.workspace = true
