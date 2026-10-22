@@ -56,9 +56,9 @@ Early beta. Tested on one device so far.
 
 ### Known issues
 
-- **Saving: new, not yet verified on device.** Dishonored keeps its saves in Steam Cloud; the app now stores those files in
-  `DishonoredData/SteamCloud/` (the same file names Steam uses, so you can copy your own PC saves from
-  `Steam/userdata/<id>/205100/remote/` into it). Earlier builds lost every save.
+- **Saving** (new in this build): autosaves, quicksaves and options are written to `DishonoredData/SteamCloud/`. Dishonored keeps
+  its saves in Steam Cloud, so these are the same file names Steam uses: you can copy your own PC saves from
+  `Steam/userdata/<id>/205100/remote/` into that folder to continue there. Verified on Linux, being verified on iPhone.
 - Linux development builds can crash in PhysX right as gameplay starts (about half the runs); under investigation. Not seen on
   iPhone so far.
 - Stutter the first time an area is seen, while its shaders compile. A shader preparation step at launch (like DXVK's state

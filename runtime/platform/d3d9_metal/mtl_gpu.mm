@@ -327,11 +327,14 @@ void MtlDevice::flush(bool wait) {
         signal_frame_ = false;
         dispatch_semaphore_t sem = frame_sem_;
         std::atomic<uint64_t> *done = &completed_;
+        MtlDevice *self = this;
         [cb addCompletedHandler:^(id<MTLCommandBuffer> c) {
             if (c.error) LOGE(LC_GFX, "metal: command buffer %llu failed: %s", (unsigned long long)s, [[c.error localizedDescription] UTF8String]);
             if (c.GPUEndTime > c.GPUStartTime) stats().gpu_busy_ns += (uint64_t)((c.GPUEndTime - c.GPUStartTime) * 1e9);
             uint64_t prev = done->load();
             while (prev < s && !done->compare_exchange_weak(prev, s)) {}
+            { std::lock_guard<std::mutex> lk(self->done_mu_); }
+            self->done_cv_.notify_all();
             if (signal) dispatch_semaphore_signal(sem);
         }];
         [cb commit];
@@ -517,7 +520,17 @@ void MtlDevice::query_issue_end(MtlQuery *q) { q->serial = cur_serial(); }
 
 bool MtlDevice::query_poll(MtlQuery *q, bool flush_if_needed) {
     if (q->serial <= completed_.load(std::memory_order_acquire)) return true;
-    if (flush_if_needed && cmd_ && serial_ == q->serial) flush(false);
+    // Real D3D9 drivers submit pending work when a query is polled even without D3DGETDATA_FLUSH, and UE3 polls with flags 0: without
+    // this the query waited in the open command buffer until Present, the GPU started each frame late and the render thread spun.
+    // Only event queries (the frame-pacing waits): occlusion results are polled without needing an answer, and flushing or waiting
+    // for each of those would split render passes and stall.
+    const bool event = q->type == D3DQUERYTYPE_EVENT;
+    if (cmd_ && serial_ == q->serial && (event || flush_if_needed)) flush(false);
+    if (!event) return q->serial <= completed_.load(std::memory_order_acquire);
+    // Not done yet: sleep until a command buffer completes (at most 0.5 ms) instead of returning at once. UE3 calls GetData in a
+    // loop that also reads the clock; without the wait that loop kept a CPU core busy for nothing.
+    std::unique_lock<std::mutex> lk(done_mu_);
+    done_cv_.wait_for(lk, std::chrono::microseconds(500), [&] { return q->serial <= completed_.load(std::memory_order_acquire); });
     return q->serial <= completed_.load(std::memory_order_acquire);
 }
 

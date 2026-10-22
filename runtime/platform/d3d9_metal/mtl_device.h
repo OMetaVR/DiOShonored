@@ -1,6 +1,8 @@
 // Metal backend: the device (IDirect3DDevice9), swap chain and the IDirect3D9 factory.
 #pragma once
 #include "mtl_objects.h"
+#include <condition_variable>
+#include <mutex>
 
 namespace dish {
 namespace mtl {
@@ -255,6 +257,8 @@ private:
     id<MTLCommandBuffer> last_committed_ = nil;
     uint64_t serial_ = 0;                       // serial of cmd_ (or of the last one when cmd_ is nil)
     std::atomic<uint64_t> completed_{0};
+    std::mutex done_mu_;                         // query waits sleep on done_cv_ until a command buffer completes
+    std::condition_variable done_cv_;
     id<MTLRenderCommandEncoder> enc_ = nil;
     id<MTLBlitCommandEncoder> blit_ = nil;
     uint32_t enc_draws_ = 0;

@@ -76,6 +76,8 @@ bool cloud_method(const char *name, uint32_t esp, uint32_t *r, uint32_t *hi) {
     auto arg = [&](int i) { return rd32(esp + 4 + 4 * i); };
     std::string path;
     struct stat st;
+    if (strstr(name, "File") && strcmp(name, "GetFileCount") && strcmp(name, "GetFileNameAndSize") && arg(0))
+        LOGD(LC_HLE, "Steam Cloud: %s(%s)", name, (const char *)(guest_base + arg(0)));
     if (!strcmp(name, "FileWrite")) {   // (name, data, size) -> bool
         int32_t n = (int32_t)arg(2);
         bool ok = false;
@@ -147,6 +149,19 @@ GuestRet steam_method(uint32_t esp, uint32_t, uint32_t, uint32_t) {
         LOGI(LC_HLE, "Steam (offline) %s::%s", it.version, m.name);
     uint32_t r = 0, hi = 0;
     if (!strcmp(it.name, "RemoteStorage") && cloud_method(m.name, esp, &r, &hi)) return guest_ret(r, hi, m.arg_bytes);
+    if (!strcmp(it.name, "User") && !strcmp(m.name, "GetUserDataFolder")) {
+        // (char *buffer, int size) -> bool. The save code gives up when Steam has no per-user data folder (before it ever writes to
+        // Steam Cloud); answer with a writable folder in the save directory (a folder, not an account).
+        const std::string guest = config().guest_user_dir + "\\AppData\\Local\\SteamUserData\\205100\\local";
+        const std::string host = config().save_dir + "/AppData/Local/SteamUserData/205100/local";
+        for (size_t i = host.find('/', 1); ; i = host.find('/', i + 1)) {
+            mkdir(host.substr(0, i).c_str(), 0755);
+            if (i == std::string::npos) break;
+        }
+        uint32_t buf = rd32(esp + 4), size = rd32(esp + 8);
+        if (buf && size > guest.size()) { memcpy(guest_base + buf, guest.c_str(), guest.size() + 1); r = 1; }
+        return guest_ret(r, 0, m.arg_bytes);
+    }
     switch (m.ret) {
         case SteamRet::Void: case SteamRet::U64: case SteamRet::Ptr: break;
         case SteamRet::U32:
