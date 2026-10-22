@@ -67,6 +67,18 @@ LX_DEF_SU(uint64_t, 8, 7u)
 #  define LX_ST_SU2(a, v) GUEST_ST_SHARED(uint16_t, (uint32_t)(a), (v))
 #  define LX_ST_SU4(a, v) GUEST_ST_SHARED(uint32_t, (uint32_t)(a), (v))
 #  define LX_ST_SU8(a, v) GUEST_ST_SHARED(uint64_t, (uint32_t)(a), (v))
+#elif (defined(__x86_64__) || defined(__i386__)) && !defined(GUEST_RELAXED_ORDERING)
+/* x86 hosts order loads and stores like the guest (TSO); the compiler must not reorder, merge or drop them either, or the guest's
+ * lock-free code breaks (PhysX's task queues corrupted at gameplay start). volatile through an alignment-1 type: unaligned is fine. */
+typedef uint16_t __attribute__((aligned(1), may_alias)) lx_u16u;
+typedef uint32_t __attribute__((aligned(1), may_alias)) lx_u32u;
+typedef uint64_t __attribute__((aligned(1), may_alias)) lx_u64u;
+#  define LX_LD_SU2(a) (*(volatile lx_u16u *)(GUEST_MB + (uint32_t)(a)))
+#  define LX_LD_SU4(a) (*(volatile lx_u32u *)(GUEST_MB + (uint32_t)(a)))
+#  define LX_LD_SU8(a) (*(volatile lx_u64u *)(GUEST_MB + (uint32_t)(a)))
+#  define LX_ST_SU2(a, v) (*(volatile lx_u16u *)(GUEST_MB + (uint32_t)(a)) = (uint16_t)(v))
+#  define LX_ST_SU4(a, v) (*(volatile lx_u32u *)(GUEST_MB + (uint32_t)(a)) = (uint32_t)(v))
+#  define LX_ST_SU8(a, v) (*(volatile lx_u64u *)(GUEST_MB + (uint32_t)(a)) = (uint64_t)(v))
 #else
 static inline __attribute__((always_inline)) uint16_t lx_ldu16(uint8_t *b, uint32_t a) { uint16_t v; __builtin_memcpy(&v, b + a, 2); return v; }
 static inline __attribute__((always_inline)) uint32_t lx_ldu32(uint8_t *b, uint32_t a) { uint32_t v; __builtin_memcpy(&v, b + a, 4); return v; }

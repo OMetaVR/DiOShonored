@@ -36,9 +36,7 @@ uint32_t k32_GetTickCount() { return tick_ms(); }
 uint64_t k32_GetTickCount64() { return since_start_ns() / 1000000ull + 600000ull; }
 uint32_t k32_timeGetTime() { return tick_ms(); }
 uint32_t k32_QueryPerformanceCounter(uint32_t p) {
-    // Windows' counter counts from boot, so games only ever see large values with a non-zero high dword. Starting near 0 gave
-    // values that are unrealistic for them (high dword 0, low dword turning negative after 214 s) and coincided with a PhysX
-    // free-list corruption at that time. Pretend the machine has been up for 3 hours.
+    // Windows' counter counts from boot, so games only ever see large values with a non-zero high dword: pretend 3 hours of uptime.
     wr64(p, since_start_ns() / 100ull + 3ull * 3600ull * kQpcFreq);
     return 1;
 }

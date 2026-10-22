@@ -2,18 +2,26 @@
 // requirement); this layer only lets the Steam build run where no Steam client can exist. It does not impersonate an account or
 // ownership: SteamAPI_Init succeeds (Dishonored assumes it does: some engine code, e.g. a pool task enumerating Steam Cloud files,
 // uses the interface pointers that are only fetched after a successful init), but the user is signed out (BLoggedOn false, invalid
-// SteamID), there are no cloud files, achievements, DLC, friends or overlay, and no callback is ever delivered.
+// SteamID), there are no achievements, DLC, friends or overlay, and no callback is ever delivered. Steam Cloud is a local folder
+// (the game keeps its saves there; see cloud_method).
 //
 // The interfaces are guest objects whose vtables lead to host methods that report "nothing" (false, 0, empty strings, invalid IDs
 // and API call handles). Vtable layouts and stack argument sizes come from the interface versions the game was built against
 // (steam_ifaces.inc, generated from Open Steamworks headers and checked against the game's call sites): a wrong argument size would
 // unbalance the guest stack, so every slot is described exactly.
+#include "dish/config.h"
 #include "dish/heap.h"
 #include "dish/hle.h"
 #include "dish/log.h"
 #include "dish/thunk.h"
 #include "dish/util.h"
 #include <atomic>
+#include <vector>
+#include <unordered_map>
+#include <sys/stat.h>
+#include <string>
+#include <dirent.h>
+#include <algorithm>
 #include <cstring>
 #include <mutex>
 
@@ -32,6 +40,105 @@ uint32_t g_empty_str;
 std::once_flag g_once;
 std::atomic<uint8_t> g_logged[kIfaces][64];
 
+// ---- Steam Cloud (ISteamRemoteStorage) on a local folder: Dishonored keeps its saves (DishonoredN.sav, DisAutoSave0/1.sav,
+// PROFILE.SAV ...) in Steam Cloud, so without this nothing is ever saved. Files live in <save_dir>/SteamCloud, the same names Steam
+// uses in userdata/<id>/205100/remote/ (a player can copy their own PC saves in). Plain local storage: no account is involved.
+std::mutex g_cloud_mu;
+std::string cloud_dir() {
+    std::string d = config().save_dir + "/SteamCloud";
+    mkdir(d.c_str(), 0755);
+    return d;
+}
+// guest file name -> host path; only plain names (Steam Cloud names have no directories here)
+bool cloud_path(uint32_t gname, std::string *out) {
+    if (!gname) return false;
+    std::string n = (const char *)(guest_base + gname);
+    if (n.empty() || n.size() > 255 || n.find('/') != std::string::npos || n.find('\\') != std::string::npos || n == "." || n == "..") return false;
+    *out = cloud_dir() + "/" + n;
+    return true;
+}
+std::vector<std::pair<std::string, uint32_t>> cloud_list() {
+    std::vector<std::pair<std::string, uint32_t>> v;
+    if (DIR *d = opendir(cloud_dir().c_str())) {
+        while (dirent *e = readdir(d)) {
+            if (e->d_name[0] == '.') continue;
+            struct stat st;
+            if (stat((cloud_dir() + "/" + e->d_name).c_str(), &st) == 0 && S_ISREG(st.st_mode)) v.push_back({e->d_name, (uint32_t)st.st_size});
+        }
+        closedir(d);
+    }
+    std::sort(v.begin(), v.end());
+    return v;
+}
+// Returns true when the method is handled; r/hi receive the result.
+bool cloud_method(const char *name, uint32_t esp, uint32_t *r, uint32_t *hi) {
+    std::lock_guard<std::mutex> lk(g_cloud_mu);
+    auto arg = [&](int i) { return rd32(esp + 4 + 4 * i); };
+    std::string path;
+    struct stat st;
+    if (!strcmp(name, "FileWrite")) {   // (name, data, size) -> bool
+        int32_t n = (int32_t)arg(2);
+        bool ok = false;
+        if (cloud_path(arg(0), &path) && n >= 0) {
+            std::string tmp = path + ".tmp";
+            if (FILE *f = fopen(tmp.c_str(), "wb")) {
+                ok = n == 0 || fwrite(guest_base + arg(1), 1, (size_t)n, f) == (size_t)n;
+                ok = fclose(f) == 0 && ok;
+                ok = ok && rename(tmp.c_str(), path.c_str()) == 0;
+                if (!ok) remove(tmp.c_str());
+            }
+        }
+        LOGI(LC_HLE, "Steam Cloud: write %s (%d bytes)%s", (const char *)(guest_base + arg(0)), n, ok ? "" : " FAILED");
+        *r = ok;
+    } else if (!strcmp(name, "FileRead")) {   // (name, data, size) -> bytes read
+        int32_t n = (int32_t)arg(2), got = 0;
+        if (cloud_path(arg(0), &path) && n > 0)
+            if (FILE *f = fopen(path.c_str(), "rb")) { got = (int32_t)fread(guest_base + arg(1), 1, (size_t)n, f); fclose(f); }
+        *r = (uint32_t)got;
+    } else if (!strcmp(name, "FileDelete") || !strcmp(name, "FileForget")) {
+        bool ok = cloud_path(arg(0), &path) && (name[4] == 'F' || remove(path.c_str()) == 0);
+        if (name[4] == 'D') LOGI(LC_HLE, "Steam Cloud: delete %s%s", (const char *)(guest_base + arg(0)), ok ? "" : " (not found)");
+        *r = ok;
+    } else if (!strcmp(name, "FileExists") || !strcmp(name, "FilePersisted")) {
+        *r = cloud_path(arg(0), &path) && stat(path.c_str(), &st) == 0;
+    } else if (!strcmp(name, "GetFileSize")) {
+        *r = cloud_path(arg(0), &path) && stat(path.c_str(), &st) == 0 ? (uint32_t)st.st_size : 0;
+    } else if (!strcmp(name, "GetFileTimestamp")) {   // int64 seconds since 1970
+        uint64_t t = cloud_path(arg(0), &path) && stat(path.c_str(), &st) == 0 ? (uint64_t)st.st_mtime : 0;
+        *r = (uint32_t)t; *hi = (uint32_t)(t >> 32);
+    } else if (!strcmp(name, "GetFileCount")) {
+        *r = (uint32_t)cloud_list().size();
+    } else if (!strcmp(name, "GetFileNameAndSize")) {   // (index, int32 *size) -> const char *
+        static std::unordered_map<std::string, uint32_t> names;   // guest copies of the names (stay valid, as Steam's do)
+        auto v = cloud_list();
+        uint32_t i = arg(0);
+        if (i >= v.size()) { if (arg(1)) wr32(arg(1), 0); *r = g_empty_str; return true; }
+        uint32_t &g = names[v[i].first];
+        if (!g) {
+            g = heap_alloc(heap_process(), HEAP_ZERO_MEMORY, (uint32_t)v[i].first.size() + 1);
+            if (g) memcpy(guest_base + g, v[i].first.c_str(), v[i].first.size() + 1);
+        }
+        if (arg(1)) wr32(arg(1), v[i].second);
+        *r = g ? g : g_empty_str;
+    } else if (!strcmp(name, "GetQuota")) {   // (int32 *total, int32 *available) -> bool
+        uint64_t used = 0;
+        for (auto &e : cloud_list()) used += e.second;
+        const uint32_t total = 1u << 30;
+        if (arg(0)) wr32(arg(0), total);
+        if (arg(1)) wr32(arg(1), used < total ? total - (uint32_t)used : 0);
+        *r = 1;
+    } else if (!strcmp(name, "IsCloudEnabledForAccount") || !strcmp(name, "IsCloudEnabledForApp")) {
+        *r = 1;
+    } else if (!strcmp(name, "SetSyncPlatforms")) {
+        *r = 1;
+    } else if (!strcmp(name, "GetSyncPlatforms")) {
+        *r = 0xFFFFFFFFu;   // k_ERemoteStoragePlatformAll
+    } else {
+        return false;
+    }
+    return true;
+}
+
 GuestRet steam_method(uint32_t esp, uint32_t, uint32_t, uint32_t) {
     const uint32_t aux = thunk_aux();
     const SteamIface &it = k_steam_ifaces[aux >> 8];
@@ -39,6 +146,7 @@ GuestRet steam_method(uint32_t esp, uint32_t, uint32_t, uint32_t) {
     if ((aux & 0xFF) < 64 && !g_logged[aux >> 8][aux & 0xFF].exchange(1))
         LOGI(LC_HLE, "Steam (offline) %s::%s", it.version, m.name);
     uint32_t r = 0, hi = 0;
+    if (!strcmp(it.name, "RemoteStorage") && cloud_method(m.name, esp, &r, &hi)) return guest_ret(r, hi, m.arg_bytes);
     switch (m.ret) {
         case SteamRet::Void: case SteamRet::U64: case SteamRet::Ptr: break;
         case SteamRet::U32:

@@ -135,9 +135,9 @@ void release_resources(RtThread *t) {
     if (ext) vm_free(ext, 0, MEM_RELEASE);
     uint32_t pet = *(uint32_t *)(guest_base + t->teb + 0xF98);   // our private: PE TLS block allocation
     if (pet) vm_free(pet, 0, MEM_RELEASE);
-    // Exited threads' stacks are decommitted but stay reserved for a while instead of being released: PhysX recreates its
-    // workers right after they exit, and handing the same stack memory to a new thread at once let it overwrite data that was
-    // still referenced from the old stack (free-list corruption at gameplay start). A stale access now faults instead.
+    // Exited threads' stacks are decommitted but stay reserved for a while instead of being released at once, so a stale pointer into
+    // a dead thread's stack faults (and is reported) instead of silently hitting a new thread's stack. PhysX recreates its workers
+    // right after they exit; this was a suspect for its free-list corruption at gameplay start (not the cause: still open).
     vm_free(t->stack_alloc, 0, MEM_DECOMMIT);
     {
         static std::mutex qmu;

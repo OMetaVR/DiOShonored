@@ -56,7 +56,11 @@ Early beta. Tested on one device so far.
 
 ### Known issues
 
-- **Saving does not work yet** (saves are not kept between sessions). Being investigated.
+- **Saving: new, not yet verified on device.** Dishonored keeps its saves in Steam Cloud; the app now stores those files in
+  `DishonoredData/SteamCloud/` (the same file names Steam uses, so you can copy your own PC saves from
+  `Steam/userdata/<id>/205100/remote/` into it). Earlier builds lost every save.
+- Linux development builds can crash in PhysX right as gameplay starts (about half the runs); under investigation. Not seen on
+  iPhone so far.
 - Stutter the first time an area is seen, while its shaders compile. A shader preparation step at launch (like DXVK's state
   cache) compiles everything recorded in earlier sessions, so revisited areas are smooth.
 - Not 60 fps yet; CPU and GPU optimisation is ongoing.
