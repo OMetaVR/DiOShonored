@@ -8,6 +8,7 @@ function(dish_test name)
   endif()
   add_executable(${name} ${ARGN} $<TARGET_OBJECTS:dish_runtime>)
   target_link_libraries(${name} PRIVATE dish_test_support ${DISH_RUNTIME_LIBS})
+  target_include_directories(${name} PRIVATE $<TARGET_PROPERTY:dish_runtime,INTERFACE_INCLUDE_DIRECTORIES>)   # SDL3 outside /usr/include
   target_link_options(${name} PRIVATE -rdynamic)
   target_compile_options(${name} PRIVATE -Wall -Wno-unused-parameter)
   add_test(NAME ${name} COMMAND ${name})
