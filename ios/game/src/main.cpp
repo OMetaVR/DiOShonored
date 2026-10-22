@@ -211,28 +211,40 @@ static void run_shader_prep(TextScreen &screen) {
 }
 
 // ---- player settings: DishonoredData/dish_settings.ini (editable in the Files app; created with defaults on first launch)
+static const char kSettingsDefault[] =
+    "# Dishonored for iOS settings. Edit in the Files app; changes apply the next time the app starts.\n"
+    "#\n"
+    "# render_height: lines the game renders before MetalFX upscales to the screen (an iPhone 13 has 1170).\n"
+    "#   720 = default (best balance on A15-class phones), 900 / 1080 = sharper, 1170 = native. Higher costs GPU time and memory.\n"
+    "render_height = 720\n";
+// the file dev10 wrote (default 900); replaced by the new default when the player never edited it
+static const char kSettingsDev10[] =
+    "# Dishonored for iOS settings. Edit in the Files app; changes apply the next time the app starts.\n"
+    "#\n"
+    "# render_height: lines the game renders before MetalFX upscales to the screen (the screen has 1170).\n"
+    "#   720 = fastest, 900 = default, 1080 = sharp, 1170 = native. Higher costs GPU time (about pixels squared).\n"
+    "render_height = 900\n";
 static void apply_settings(const std::string &dir) {
     const std::string path = dir + "/dish_settings.ini";
-    FILE *f = fopen(path.c_str(), "r");
-    if (!f) {
-        if ((f = fopen(path.c_str(), "w"))) {
-            fputs("# Dishonored for iOS settings. Edit in the Files app; changes apply the next time the app starts.\n"
-                  "#\n"
-                  "# render_height: lines the game renders before MetalFX upscales to the screen (the screen has 1170).\n"
-                  "#   720 = fastest, 900 = default, 1080 = sharp, 1170 = native. Higher costs GPU time (about pixels squared).\n"
-                  "render_height = 900\n", f);
-            fclose(f);
-        }
-        f = fopen(path.c_str(), "r");
-    }
-    int height = 900;
-    if (f) {
-        char line[256];
-        while (fgets(line, sizeof line, f)) {
-            int v;
-            if (sscanf(line, " render_height = %d", &v) == 1) height = v;
-        }
+    std::string text;
+    if (FILE *f = fopen(path.c_str(), "rb")) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
         fclose(f);
+    }
+    if (text.empty() || text == kSettingsDev10) {
+        if (FILE *f = fopen(path.c_str(), "wb")) { fputs(kSettingsDefault, f); fclose(f); }
+        text = kSettingsDefault;
+    }
+    int height = 720;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t e = text.find('\n', pos);
+        if (e == std::string::npos) e = text.size();
+        int v;
+        if (sscanf(text.substr(pos, e - pos).c_str(), " render_height = %d", &v) == 1) height = v;
+        pos = e + 1;
     }
     height = std::max(480, std::min(height, 1440));
     char v[16];
