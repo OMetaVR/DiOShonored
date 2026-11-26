@@ -4,9 +4,9 @@
 // <cache_dir>/shaders/, and every render pipeline the backend builds is appended to <cache_dir>/pipelines.bin with the content
 // hashes of its shaders and its vertex declaration. Before the game starts, shader_prep_start() (dish/shader_prep.h) translates and compiles everything
 // recorded with exactly the code paths the game later uses: Metal's on-device compiler cache (keyed on the MSL source and the
-// compile options) then answers the in-game compiles in a fraction of a millisecond, and in the foreground mode the pipelines are
-// also written to the binary archive the device loads. Nothing here is game data shipped with the app: it is derived on the device
-// from the user's own copy.
+// compile options) then answers the in-game compiles in a fraction of a millisecond, and building every recorded pipeline fills the
+// system's pipeline cache the same way. Nothing here is game data shipped with the app: it is derived on the device from the user's
+// own copy.
 #pragma once
 #import <Metal/Metal.h>
 #include "mtl_device.h"
@@ -21,7 +21,6 @@ namespace dish {
 namespace mtl {
 
 uint64_t shader_content_hash(const uint32_t *tokens, size_t n);
-std::string pipeline_archive_path();   // the MTLBinaryArchive the device loads and the foreground preparation writes
 
 // Translate D3D9 bytecode to MSL and compile it with the backend's options. Shared by the device and the preload so both produce
 // identical sources (the compiler cache hit depends on it).

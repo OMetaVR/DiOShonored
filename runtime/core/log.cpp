@@ -106,6 +106,8 @@ void log_write(LogCh ch, LogLvl lvl, const char *fmt, ...) {
     if (g_log_hook) g_log_hook(ch, lvl, buf);
 }
 
+int log_file_fd() { return g_log_file ? fileno(g_log_file) : -1; }
+
 void log_flush() {
     std::lock_guard<std::mutex> lk(g_log_mu);
     fflush(stderr);

@@ -186,17 +186,17 @@ int encode_ise_q48(BitWriter &bw, const uint8_t *vals, int n, int pos) {
 }
 
 int q48_index_for(int u8) {
-    static uint8_t lut[256];
-    static bool init = false;
-    if (!init) {
+    struct Lut { uint8_t v[256]; };
+    static const Lut lut = [] {   // thread-safe initialisation: levels transcode on several threads
+        Lut l{};
         for (int v = 0; v < 256; v++) {
             int best = 0, bd = 1 << 30;
             for (int q = 0; q < 48; q++) { int d = abs((int)kAstcQ48ToU8[q] - v); if (d < bd) { bd = d; best = q; } }
-            lut[v] = (uint8_t)best;
+            l.v[v] = (uint8_t)best;
         }
-        init = true;
-    }
-    return lut[u8 < 0 ? 0 : u8 > 255 ? 255 : u8];
+        return l;
+    }();
+    return lut.v[u8 < 0 ? 0 : u8 > 255 ? 255 : u8];
 }
 
 const uint8_t kBcToAstcLevel[4] = {0, 3, 1, 2};   // BC1 4-colour index -> ASTC 2-bit weight level (0, 1/3, 2/3, 1 of the way c0 -> c1 mapped to levels 0,21,43,64)

@@ -246,67 +246,34 @@ id<MTLRenderPipelineState> MtlDevice::get_pso(const PsoKey &k, ShaderCommon &vs,
     uint64_t t0 = now_ns();
     MTLRenderPipelineDescriptor *d = make_pso_desc(k, vs.fn, vs.x.inputs, ps ? ps->fn : nil, decl ? &decl->elems : nullptr);
     record_pipeline(k, vs.content_hash, ps ? ps->content_hash : 0, decl ? &decl->elems : nullptr);
-    NSError *err = nil;
-    id<MTLRenderPipelineState> pso = nil;
-    id<MTLBinaryArchive> arch = nil;
-    {
-        std::lock_guard<std::mutex> lk(archive_mu_);   // save_archive may replace it from a completion thread
-        arch = archive_;
-    }
-    if (@available(iOS 14.0, *)) {
-        if (arch) {
-            d.binaryArchives = @[arch];
-            pso = [mdev_ newRenderPipelineStateWithDescriptor:d options:MTLPipelineOptionFailOnBinaryArchiveMiss reflection:nil error:&err];
-            if (pso) stats().pipeline_archive_hits++;
-            err = nil;
-        }
-    }
     auto entry = std::make_shared<PsoEntry>();
     pso_cache_[k] = entry;
-    // Metal cannot pack pipelines without a fragment function into a binary archive ("expecting 'fragment' stage"), and one such
-    // pipeline makes every later save fail: depth-only pipelines are not archived
-    const bool archivable = arch != nil && d.fragmentFunction != nil;
-    if (pso) {
-        entry->pso = pso;
-        entry->state.store(1, std::memory_order_release);
-    } else if (options().sync_shaders) {
-        pso = [mdev_ newRenderPipelineStateWithDescriptor:d error:&err];
+    if (options().sync_shaders) {
+        NSError *err = nil;
+        id<MTLRenderPipelineState> pso = [mdev_ newRenderPipelineStateWithDescriptor:d error:&err];
         if (!pso) LOGE(LC_GFX, "metal: pipeline creation failed (vs %llu ps %llu): %s", (unsigned long long)k.vs, (unsigned long long)k.ps, err ? [[err localizedDescription] UTF8String] : "?");
-        else if (archivable) archive_add(d);
         entry->pso = pso;
         entry->state.store(pso ? 1 : 2, std::memory_order_release);
-    } else {
-        const uint64_t vsid = k.vs, psid = k.ps;
-        MtlDevice *self = this;
-        [mdev_ newRenderPipelineStateWithDescriptor:d completionHandler:^(id<MTLRenderPipelineState> p, NSError *e) {
-            if (!p) LOGE(LC_GFX, "metal: pipeline creation failed (vs %llu ps %llu): %s", (unsigned long long)vsid, (unsigned long long)psid, e ? [[e localizedDescription] UTF8String] : "?");
-            else if (archivable) self->archive_add(d);
-            stats().pipeline_create_ns += now_ns() - t0;
-            entry->pso = p;
-            entry->state.store(p ? 1 : 2, std::memory_order_release);
-        }];
         stats().pipelines_created++;
-        stats().draws_skipped_pso++;
-        *ok = false;
-        return nil;
+        stats().pipeline_create_ns += now_ns() - t0;
+        *ok = pso != nil;
+        return pso;
     }
+    // asynchronous: the compiler service can be busy for a long time when a new area's shaders compile, so the draws that need the
+    // pipeline are skipped until Metal has built it. The shader preparation built every recorded pipeline at launch, which fills
+    // the system's pipeline cache, so most of these come back quickly. (No MTLBinaryArchive: appending to one loaded from disk
+    // cannot be saved, and loading one the preparation had built crashed inside Metal.)
+    const uint64_t vsid = k.vs, psid = k.ps;
+    [mdev_ newRenderPipelineStateWithDescriptor:d completionHandler:^(id<MTLRenderPipelineState> p, NSError *e) {
+        if (!p) LOGE(LC_GFX, "metal: pipeline creation failed (vs %llu ps %llu): %s", (unsigned long long)vsid, (unsigned long long)psid, e ? [[e localizedDescription] UTF8String] : "?");
+        stats().pipeline_create_ns += now_ns() - t0;
+        entry->pso = p;
+        entry->state.store(p ? 1 : 2, std::memory_order_release);
+    }];
     stats().pipelines_created++;
-    stats().pipeline_create_ns += now_ns() - t0;
-    *ok = pso != nil;
-    return pso;
-}
-
-void MtlDevice::archive_add(MTLRenderPipelineDescriptor *d) {
-    if (@available(iOS 14.0, *)) {
-        bool save = false;
-        {
-            std::lock_guard<std::mutex> lk(archive_mu_);
-            NSError *aerr = nil;
-            if (archive_ && [archive_ addRenderPipelineFunctionsWithDescriptor:d error:&aerr]) archive_dirty_++;
-            save = archive_dirty_ >= 64;
-        }
-        if (save) save_archive();
-    }
+    stats().draws_skipped_pso++;
+    *ok = false;
+    return nil;
 }
 
 id<MTLDepthStencilState> MtlDevice::get_dss() {

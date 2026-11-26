@@ -28,6 +28,7 @@ std::string log_dir();   // directory of the DISH_LOG_FILE / log_set_file file (
 const char *log_ch_name(LogCh ch);
 void log_write(LogCh ch, LogLvl lvl, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
 void log_flush();
+int log_file_fd();         // the log file's descriptor (-1 when none); for crash handlers, which cannot take the log lock
 // Capture hook for tests: when non-null every formatted line is also passed here.
 extern void (*g_log_hook)(LogCh, LogLvl, const char *line);
 

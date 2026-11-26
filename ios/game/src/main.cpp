@@ -311,6 +311,7 @@ int main(int argc, char **argv) {
     log_init_from_env();
     log_set_file(paths.log_file.c_str());
     fault_set_log_path((paths.save_dir + "/fault.log").c_str());
+    fault_install();
     set_unresolved_log_path((paths.save_dir + "/unresolved.log").c_str());
     apply_settings(paths.save_dir);
     std::string libs = dish_ios_configure_libraries();
@@ -350,10 +351,12 @@ int main(int argc, char **argv) {
     mkdir(frames_dir.c_str(), 0755);
     setenv("DISH_FRAME_DUMP", frames_dir.c_str(), 0);
     setenv("DISH_FRAME_DUMP_EVERY", "15", 0);
-    // and log every D3D9 call of one frame on the main menu (viewports, render-target sizes) for back-buffer layout checks
-    setenv("DISH_D3D9_TRACE_FRAME", "4000", 0);
+    // and log every D3D9 call of one frame, usually in gameplay (render-target switches, viewports, sizes)
+    setenv("DISH_D3D9_TRACE_FRAME", "9000", 0);
     // and a CPU profile of every thread from 200 to 320 s after launch (DishonoredData/profile.txt, tools/analysis/profile_report.py)
     setenv("DISH_PROFILE", "200:120", 0);
+    // and the GPU time of every render pass in frame 6000 and every 3000th frame after it (the "pass timing" log lines)
+    setenv("DISH_METAL_PASS_TIMING", "6000:3000", 0);
 #else
     const std::string dev_server;
 #endif

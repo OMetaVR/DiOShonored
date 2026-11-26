@@ -247,16 +247,16 @@ HRESULT MtlDevice::GetVertexDeclaration(IDirect3DVertexDeclaration9 **pp) {
 HRESULT MtlDevice::CreateVertexShader(const DWORD *code, IDirect3DVertexShader9 **pp) {
     if (!code || !pp) return D3DERR_INVALIDCALL;
     MtlVertexShader *s = new MtlVertexShader();
-    s->sh.start(this, code, false);
-    if (s->sh.state.load() == 2) { delete s; return D3DERR_INVALIDCALL; }
+    s->sh.start(this, static_cast<IDirect3DVertexShader9 *>(s), code, false);
+    if (s->sh.state.load() == 2) { s->Release(); return D3DERR_INVALIDCALL; }
     *pp = s;
     return D3D_OK;
 }
 HRESULT MtlDevice::CreatePixelShader(const DWORD *code, IDirect3DPixelShader9 **pp) {
     if (!code || !pp) return D3DERR_INVALIDCALL;
     MtlPixelShader *s = new MtlPixelShader();
-    s->sh.start(this, code, true);
-    if (s->sh.state.load() == 2) { delete s; return D3DERR_INVALIDCALL; }
+    s->sh.start(this, static_cast<IDirect3DPixelShader9 *>(s), code, true);
+    if (s->sh.state.load() == 2) { s->Release(); return D3DERR_INVALIDCALL; }
     *pp = s;
     return D3D_OK;
 }
@@ -398,9 +398,16 @@ HRESULT MtlDevice::Clear(DWORD count, const D3DRECT *rects, DWORD flags, D3DCOLO
             full = r.left <= 0 && r.top <= 0 && (uint32_t)r.right >= W && (uint32_t)r.bottom >= H;
         }
     }
+    if (full && enc_ && !wantC) {
+        // depth / stencil only and the pass is already open: clear inside it. Ending it for a load-action clear stores and reloads
+        // every attachment, and UE3 clears the stencil mid-pass every frame (the pass timing showed a 2-4 ms GPU gap around that
+        // empty pass). Colour clears keep the load action (its value is exactly the D3D clear colour, whatever the sRGB state).
+        RECT r{0, 0, (LONG)W, (LONG)H};
+        draw_clear_quad(flags, color, z, stencil, &r);
+        return D3D_OK;
+    }
     if (full) {
         // a full-surface clear becomes the load action of the next render pass
-        if (enc_) end_pass();
         if (wantC) { pend_.color = true; color_to_float(color, pend_.c); }
         if (wantZ) { pend_.depth = true; pend_.z = std::min(1.0f, std::max(0.0f, z)); }
         if (wantS) { pend_.stencil = true; pend_.s = stencil & 0xFF; }

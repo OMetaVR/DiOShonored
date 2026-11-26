@@ -102,6 +102,24 @@ static GuestPad *pad_for(uint32_t ebp) {
     return nullptr;
 }
 
+// Indirect calls (virtual calls, function pointers) look their target up in the lifter's perfect-hash table, whose 2 MB of entries
+// mostly miss the caches. A small direct-mapped cache in front of it keeps the hot targets close: each entry packs the guest
+// address and the host function as a 32-bit offset from guest_lookup into one 64-bit word, so threads never see a torn pair.
+static std::atomic<uint64_t> g_icache[4096];
+
+static inline GuestFn lookup_cached(uint32_t target) {
+    const uint32_t slot = (target * 0x9E3779B1u) >> 20;
+    const uint64_t e = g_icache[slot].load(std::memory_order_relaxed);
+    const uintptr_t anchor = (uintptr_t)&guest_lookup;
+    if ((uint32_t)e == target && target != 0) return (GuestFn)(anchor + (intptr_t)(int32_t)(uint32_t)(e >> 32));
+    GuestFn f = guest_lookup(target);
+    if (f) {
+        const intptr_t off = (intptr_t)(uintptr_t)f - (intptr_t)anchor;
+        if (off == (intptr_t)(int32_t)off) g_icache[slot].store(((uint64_t)(uint32_t)(int32_t)off << 32) | target, std::memory_order_relaxed);
+    }
+    return f;
+}
+
 GuestRet guest_call(uint32_t target, uint32_t esp, uint32_t eax, uint32_t ecx, uint32_t edx) {
     if (__builtin_expect(is_thunk_addr(target), 0)) {
         uint32_t idx = thunk_index(target);
@@ -124,7 +142,7 @@ GuestRet guest_call(uint32_t target, uint32_t esp, uint32_t eax, uint32_t ecx, u
         t->cur_sp = saved_sp;
         return r;
     }
-    GuestFn f = guest_lookup(target);
+    GuestFn f = lookup_cached(target);
     if (__builtin_expect(f != nullptr, 1)) return f(esp, eax, ecx, edx);
     if (target == kReturnSentinel) return guest_ret(eax, edx, 0);
     if (guest_thread) {

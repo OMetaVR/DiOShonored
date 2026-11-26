@@ -372,8 +372,9 @@ HRESULT TexData::unlock(uint32_t face, uint32_t level) {
                     t = g_tokens[slot];
                 }
                 if (t.tex && t.w == L.w && t.h == L.h && t.tex.pixelFormat == tex.pixelFormat) {
+                    // early only when no upload in the command stream could have written the source since
                     dev->gpu_copy_texture(t.tex, t.level, t.slice, MTLOriginMake(0, 0, 0), MTLSizeMake(L.w, L.h, 1), tex, level, cube ? face : 0,
-                                          MTLOriginMake(0, 0, 0));
+                                          MTLOriginMake(0, 0, 0), dev->upload_early(this) && !dev->inline_uploads_pending());
                     stats().copy_tokens_used++;
                     L.data.clear();
                     L.data.shrink_to_fit();
@@ -383,7 +384,7 @@ HRESULT TexData::unlock(uint32_t face, uint32_t level) {
             }
         }
         upload(face, level, L.x, L.y, L.z, L.w, L.h, L.d, L.data.data() + xoff, L.pitch, L.slice);
-        if (autogen && level == 0) generate_mips();
+        if (autogen && level == 0) generate_mips(dev->upload_early(this));
     }
     L.data.clear();
     L.data.shrink_to_fit();
@@ -398,6 +399,7 @@ void TexData::upload(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint
     MTLOrigin org = MTLOriginMake(x, y, volume ? z : 0);
     MTLSize sz = MTLSizeMake(cw, ch, volume ? rd : 1);
     const uint32_t slice_idx = cube ? face : 0;
+    const bool early = dev->upload_early(this);
     stats().uploads++;
     if (needs_shadow()) {   // keep the D3D-layout copy current (every upload path: unlock, UpdateSurface, UpdateTexture)
         const uint32_t ld = volume ? mip_dim(d, level) : 1;
@@ -426,14 +428,8 @@ void TexData::upload(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint
         for (uint32_t r = 0; r < bh; r++) memcpy(&blocks[(size_t)r * bw * bb], src + (size_t)r * pitch, (size_t)bw * bb);
         stats().upload_bytes += blocks.size();
         if (astc) {
-            std::vector<uint8_t> out((size_t)bw * bh * 16);
-            uint64_t t0 = now_ns();
-            tex::AstcStats as;
-            tex::bc_to_astc_level(bc, blocks.data(), cw, ch, out.data(), &as);
-            stats().transcode_ns += now_ns() - t0;
-            stats().transcode_blocks += as.blocks;
             stats().transcode_in_bytes += blocks.size();
-            dev->gpu_upload(tex, level, slice_idx, org, sz, out.data(), bw * 16, 0);
+            dev->gpu_upload_astc(tex, level, slice_idx, org, sz, (int)bc, std::move(blocks), early);
         } else {
             const uint32_t bpp = tex::bc_decoded_bpp(bc);
             std::vector<uint8_t> out((size_t)cw * ch * bpp);
@@ -441,7 +437,7 @@ void TexData::upload(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint
             tex::bc_decode_level(bc, blocks.data(), cw, ch, out.data(), (size_t)cw * bpp);
             stats().decode_ns += now_ns() - t0;
             stats().decode_in_bytes += blocks.size();
-            dev->gpu_upload(tex, level, slice_idx, org, sz, out.data(), cw * bpp, 0);
+            dev->gpu_upload(tex, level, slice_idx, org, sz, out.data(), cw * bpp, 0, early);
         }
         return;
     }
@@ -459,11 +455,11 @@ void TexData::upload(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint
             }
         }
         stats().upload_bytes += out.size();
-        dev->gpu_upload(tex, level, slice_idx, org, sz, out.data(), cw * 4, 0);
+        dev->gpu_upload(tex, level, slice_idx, org, sz, out.data(), cw * 4, 0, early);
         return;
     }
     stats().upload_bytes += (size_t)pitch * ch * (volume ? rd : 1);
-    dev->gpu_upload(tex, level, slice_idx, org, sz, src, pitch, slice);
+    dev->gpu_upload(tex, level, slice_idx, org, sz, src, pitch, slice, early);
 }
 
 bool TexData::readback(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t rw, uint32_t rh, uint8_t *dst, uint32_t pitch) {
@@ -472,8 +468,8 @@ bool TexData::readback(uint32_t face, uint32_t level, uint32_t x, uint32_t y, ui
     return dev->gpu_readback(tex, level, cube ? face : 0, MTLOriginMake(x, y, 0), MTLSizeMake(rw, rh, 1), dst, pitch);
 }
 
-void TexData::generate_mips() {
-    if (gpu && tex && levels > 1) dev->gpu_generate_mips(tex);
+void TexData::generate_mips(bool early) {
+    if (gpu && tex && levels > 1) dev->gpu_generate_mips(tex, early);
 }
 
 // ---- surfaces -----------------------------------------------------------------------------------------------------------------------
@@ -640,8 +636,9 @@ HRESULT MtlPixelShader::GetFunction(void *data, UINT *size) {
     return D3D_OK;
 }
 
-void ShaderCommon::start(MtlDevice *d, const uint32_t *code, bool pixel) {
+void ShaderCommon::start(MtlDevice *d, IUnknown *owner_obj, const uint32_t *code, bool pixel) {
     dev = d;
+    owner = owner_obj;
     is_pixel = pixel;
     sid = d->next_shader_id();
     size_t n = shader_token_count(code, 1 << 16);
@@ -653,18 +650,26 @@ void ShaderCommon::start(MtlDevice *d, const uint32_t *code, bool pixel) {
     dispatch_group_enter(group);
     stats().shaders_created++;
     stats().shaders_pending++;
+    // Keep the COM shader alive until this queued block finishes (otherwise releasing a shader before its compile runs
+    // frees `this` and disposes `group` while still entered, which traps in libdispatch).
+    IUnknown *keep = owner;
+    if (keep) keep->AddRef();
     dispatch_async(d->compile_queue(), ^{
         int expect = 0;
         if (state.compare_exchange_strong(expect, 3)) compile();
         dispatch_group_leave(group);
+        if (keep) keep->Release();
     });
 }
 
 void ShaderCommon::prioritize() {
     if (state.load(std::memory_order_acquire) != 0 || prioritized.exchange(true)) return;
-    dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
+    IUnknown *keep = owner;
+    if (keep) keep->AddRef();
+    dispatch_async(dev->urgent_compile_queue(), ^{   // bounded: a global queue spawned a thread per waiting compile
         int expect = 0;
         if (state.compare_exchange_strong(expect, 3)) compile();
+        if (keep) keep->Release();
     });
 }
 

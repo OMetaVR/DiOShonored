@@ -1,12 +1,14 @@
 // Metal backend: device lifetime, command stream, encoders, uploads/readbacks, queries, presentation (CAMetalLayer + MetalFX).
 #include "mtl_device.h"
 #include "mtl_shadercache.h"
+#include "texcodec.h"
 #include "dish/lifecycle.h"
 #include "dish/vfs.h"
 #include "dish/mainthread.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstring>
 #include <sys/stat.h>
 
 namespace dish {
@@ -45,13 +47,20 @@ fragment ClearOut dish_clear_fs(constant ClearU &u [[buffer(0)]]) {
 )MSL";
 
 size_t PsoKeyHash::operator()(const PsoKey &k) const {
+    // 8 bytes per step (a byte-wise FNV over the 180-byte key was 3.6% of the render thread)
+    static_assert(sizeof(PsoKey) % 8 == 0, "PsoKey is hashed in 8-byte words");
     const uint8_t *p = (const uint8_t *)&k;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < sizeof k; i++) { h ^= p[i]; h *= 1099511628211ull; }
-    return (size_t)h;
+    uint64_t h = 0x9E3779B97F4A7C15ull ^ sizeof k;
+    size_t i = 0;
+    for (; i + 8 <= sizeof k; i += 8) {
+        uint64_t v;
+        memcpy(&v, p + i, 8);
+        h = (h ^ v) * 0xFF51AFD7ED558CCDull;
+        h ^= h >> 32;
+    }
+    return (size_t)(h ^ (h >> 29));
 }
 
-static MtlDevice *g_primary = nullptr;   // for the lifecycle hook
 
 MtlDevice::MtlDevice() = default;
 MtlDevice::~MtlDevice() = default;
@@ -61,15 +70,26 @@ std::string MtlDevice::describe_gpu() const {
 }
 
 // ---- init / teardown -------------------------------------------------------------------------------------------------------------
+// an Objective-C exception nobody catches (Metal raises them for invalid API use) aborts the app: log its reason first
+static void log_uncaught_exception(NSException *e) {
+    LOGE(LC_GFX, "uncaught Objective-C exception %s: %s", [[e name] UTF8String], [[e reason] UTF8String]);
+    for (NSString *f in [e callStackSymbols]) LOGE(LC_GFX, "  %s", [f UTF8String]);
+}
+
 bool MtlDevice::init(IDirect3D9 *parent, UINT adapter, D3DDEVTYPE type, HWND focus, DWORD behavior, D3DPRESENT_PARAMETERS *pp) {
+    NSSetUncaughtExceptionHandler(&log_uncaught_exception);
     parent_ = parent;
     mdev_ = MTLCreateSystemDefaultDevice();
     if (!mdev_) { LOGE(LC_GFX, "metal: no Metal device"); return false; }
     queue_ = [mdev_ newCommandQueue];
     // background shader compiles: a few serial queues used round-robin (a concurrent queue would keep adding threads while compiles
-    // block, starving the game's threads and the GPU driver); compiles a draw is waiting for go to a high-priority queue instead
-    dispatch_queue_attr_t qa = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_UTILITY, 0);
+    // block, starving the game's threads and the GPU driver). A level creates thousands of shaders it mostly never draws; on a first
+    // visit compiling them took over a minute at utility priority and slowed every frame meanwhile, so they run at background
+    // priority (the efficiency cores), and the compiles a draw is waiting for go to two high-priority queues instead
+    dispatch_queue_attr_t qa = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_BACKGROUND, 0);
     for (auto &q : compile_qs_) q = dispatch_queue_create("dish.d3d9.shader-compile", qa);
+    dispatch_queue_attr_t ua = dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INITIATED, 0);
+    for (auto &q : urgent_qs_) q = dispatch_queue_create("dish.d3d9.shader-compile-urgent", ua);
     fill_caps_table(caps_);
     cp_.AdapterOrdinal = adapter;
     cp_.DeviceType = type;
@@ -120,17 +140,12 @@ bool MtlDevice::init(IDirect3D9 *parent, UINT adapter, D3DDEVTYPE type, HWND foc
     *pp = pp_;
     swapchain_ = new MtlSwapChain();
     swapchain_->dev = this;
-    if (!g_primary) {
-        g_primary = this;
-        lifecycle_add_hook([](bool paused) { if (paused && g_primary) g_primary->save_archive(); });
-    }
     LOGI(LC_GFX, "metal d3d9 device: %s, backbuffer %ux%u, drawable %.0fx%.0f, MetalFX spatial %s, ASTC transcode %s", describe_gpu().c_str(), pp_.BackBufferWidth,
          pp_.BackBufferHeight, layer_.drawableSize.width, layer_.drawableSize.height, metalfx_ok_ ? "available" : "unavailable", options().astc ? "on" : "off");
     return true;
 }
 
 void MtlDevice::destroy() {
-    if (g_primary == this) { save_archive(); g_primary = nullptr; }
     flush(true);
     for (auto &r : rt_) r.reset();
     ds_.reset();
@@ -170,46 +185,12 @@ void MtlDevice::init_present_path() {
     if (@available(iOS 16.0, *)) {
         if (options().upscale && [MTLFXSpatialScalerDescriptor supportsDevice:mdev_]) metalfx_ok_ = true;
     }
-    // pipeline archive
-    if (@available(iOS 14.0, *)) {
-        const std::string &dir = options().cache_dir;
-        if (!dir.empty()) {
-            [[NSFileManager defaultManager] createDirectoryAtPath:[NSString stringWithUTF8String:dir.c_str()] withIntermediateDirectories:YES attributes:nil error:nil];
-            remove((dir + "/pipelines.archive").c_str());   // the v1 archive holds depth-only pipelines that cannot be packed again
-            archive_path_ = pipeline_archive_path();
-            NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:archive_path_.c_str()]];
-            MTLBinaryArchiveDescriptor *ad = [[MTLBinaryArchiveDescriptor alloc] init];
-            NSError *err = nil;
-            struct stat st;
-            if (stat(archive_path_.c_str(), &st) == 0) {
-                ad.url = url;
-                archive_ = [mdev_ newBinaryArchiveWithDescriptor:ad error:&err];
-                if (!archive_) { LOGW(LC_GFX, "metal: pipeline archive unusable (%s); starting a new one", err ? [[err localizedDescription] UTF8String] : "?"); remove(archive_path_.c_str()); }
-            }
-            if (!archive_) {
-                ad.url = nil;
-                archive_ = [mdev_ newBinaryArchiveWithDescriptor:ad error:&err];
-            }
-        }
-    }
-}
-
-void MtlDevice::save_archive() {
-    if (@available(iOS 14.0, *)) {
-        std::lock_guard<std::mutex> lk(archive_mu_);
-        if (!archive_ || archive_dirty_ == 0) return;
-        NSError *err = nil;
-        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:archive_path_.c_str()]];
-        if (![archive_ serializeToURL:url error:&err]) {
-            // a pipeline the archive cannot pack poisons every later save: start a fresh archive (the saved file stays as it was)
-            LOGW(LC_GFX, "metal: cannot save the pipeline archive, starting a new one: %s", err ? [[err localizedDescription] UTF8String] : "?");
-            MTLBinaryArchiveDescriptor *ad = [[MTLBinaryArchiveDescriptor alloc] init];
-            archive_ = [mdev_ newBinaryArchiveWithDescriptor:ad error:nil];
-        } else {
-            LOGI(LC_GFX, "metal: pipeline archive saved (%u new pipelines)", archive_dirty_);
-        }
-        archive_dirty_ = 0;
-    }
+    // pipeline archives from earlier builds (no longer used: see get_pso)
+    const std::string &dir = options().cache_dir;
+    if (!dir.empty())
+        for (const char *old : {"/pipelines.archive", "/pipelines-v2.archive", "/pipelines-v3.archive", "/pipelines-v3.archive.tmp",
+                                "/pipelines-v4.archive", "/pipelines-v4-new.archive", "/archive-loading", "/pipeline-archives-off"})
+            remove((dir + old).c_str());
 }
 
 // ---- backbuffer -------------------------------------------------------------------------------------------------------------------------
@@ -314,12 +295,26 @@ id<MTLBlitCommandEncoder> MtlDevice::blit_enc() {
     end_pass();
     begin_cmd();
     blit_ = [cmd_ blitCommandEncoder];
+    if (pt_active_) pt_blits_++;
     return blit_;
+}
+
+void MtlDevice::commit_uploads() {
+    if (!up_cmd_) return;
+    if (up_blit_) { [up_blit_ endEncoding]; up_blit_ = nil; }
+    if (xcode_group_) {   // transcodes still writing into this command buffer's staging buffers
+        const uint64_t t0 = now_ns();
+        dispatch_group_wait(xcode_group_, DISPATCH_TIME_FOREVER);
+        stats().transcode_wait_ns += now_ns() - t0;
+    }
+    [up_cmd_ commit];
+    up_cmd_ = nil;
 }
 
 void MtlDevice::flush(bool wait) {
     end_pass();
     end_blit();
+    commit_uploads();
     if (cmd_) {
         id<MTLCommandBuffer> cb = cmd_;
         cmd_ = nil;
@@ -340,6 +335,7 @@ void MtlDevice::flush(bool wait) {
         }];
         [cb commit];
         last_committed_ = cb;
+        if (pt_active_) pt_cmdbufs_++;
         if (wait) {
             [cb waitUntilCompleted];
             uint64_t prev = completed_.load();
@@ -359,6 +355,7 @@ void MtlDevice::wait_serial(uint64_t serial) {
 
 void MtlDevice::end_pass() {
     if (enc_) {
+        if (pt_open_) { pt_passes_.back().draws = enc_draws_; pt_open_ = false; }
         if (active_occ_) [enc_ setVisibilityResultMode:MTLVisibilityResultModeDisabled offset:0];
         [enc_ endEncoding];
         enc_ = nil;
@@ -372,6 +369,7 @@ void MtlDevice::end_pass() {
 void MtlDevice::flush_clear() {
     if (!(pend_.color || pend_.depth || pend_.stencil)) return;
     if (render_enc()) {
+        if (pt_open_) { pt_passes_.back().draws = 0; pt_open_ = false; }
         [enc_ endEncoding];
         enc_ = nil;
         enc_draws_ = 0;
@@ -430,6 +428,7 @@ id<MTLRenderCommandEncoder> MtlDevice::render_enc() {
     MTLRenderPassDescriptor *rp = make_pass(true);
     if (!rp) return nil;
     begin_cmd();
+    if (pt_active_) pass_timing_attach(rp);
     enc_ = [cmd_ renderCommandEncoderWithDescriptor:rp];
     enc_srgb_ = st_.rs[D3DRS_SRGBWRITEENABLE] != 0;
     pend_ = PendingClear();
@@ -458,15 +457,73 @@ MtlDevice::RingAlloc MtlDevice::ring_alloc(size_t size, size_t align) {
 }
 
 // ---- uploads / readbacks -----------------------------------------------------------------------------------------------------------------------
-void MtlDevice::gpu_upload(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, const void *bytes, uint32_t row_pitch, uint32_t img_pitch) {
+bool MtlDevice::upload_early(const TexData *td) const {
+    if (td->usage & (D3DUSAGE_RENDERTARGET | D3DUSAGE_DEPTHSTENCIL)) return false;
+    return !(cmd_ && td->last_use == serial_);   // not drawn with in the command buffer being recorded
+}
+
+id<MTLBlitCommandEncoder> MtlDevice::upload_enc(bool early) {
+    if (!early) {
+        id<MTLBlitCommandEncoder> b = blit_enc();
+        inline_upload_serial_ = serial_;
+        return b;
+    }
+    begin_cmd();   // staging buffers retire with the serial of the command buffer that follows the uploads
+    if (!up_cmd_) up_cmd_ = [queue_ commandBuffer];
+    if (!up_blit_) up_blit_ = [up_cmd_ blitCommandEncoder];
+    stats().early_uploads++;
+    return up_blit_;
+}
+
+void MtlDevice::gpu_upload(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, const void *bytes, uint32_t row_pitch, uint32_t img_pitch,
+                           bool early) {
     const bool compressed = t.pixelFormat == MTLPixelFormatASTC_4x4_LDR || t.pixelFormat == MTLPixelFormatASTC_4x4_sRGB;
     const size_t rows = compressed ? (sz.height + 3) / 4 : sz.height;
     if (img_pitch == 0) img_pitch = (uint32_t)(row_pitch * rows);
     const size_t len = (size_t)img_pitch * sz.depth;
     id<MTLBuffer> stage = acquire_buffer(len);
     memcpy(stage.contents, bytes, std::min(len, (size_t)row_pitch * rows * sz.depth));
-    id<MTLBlitCommandEncoder> b = blit_enc();
+    id<MTLBlitCommandEncoder> b = upload_enc(early);
     [b copyFromBuffer:stage sourceOffset:0 sourceBytesPerRow:row_pitch sourceBytesPerImage:img_pitch sourceSize:sz toTexture:t destinationSlice:slice destinationLevel:level destinationOrigin:o];
+    retire_buffer(stage, serial_);
+}
+
+void MtlDevice::gpu_upload_astc(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, int bc, std::vector<uint8_t> &&blocks, bool early) {
+    const tex::Bc f = (tex::Bc)bc;
+    const uint32_t cw = (uint32_t)sz.width, ch = (uint32_t)sz.height, bw = tex::bc_blocks(cw), bh = tex::bc_blocks(ch);
+    const size_t len = (size_t)bw * bh * 16;
+    id<MTLBuffer> stage = acquire_buffer(len);
+    // small levels, and uploads that must stay in the command stream, transcode here; large early ones in stripes on worker threads
+    // while the rest of the frame is recorded (the commit waits for them)
+    const uint32_t stripe_rows = 32;   // block rows per job (128 texel rows)
+    if (!early || (size_t)bw * bh < 4096) {
+        const uint64_t t0 = now_ns();
+        tex::AstcStats as;
+        tex::bc_to_astc_level(f, blocks.data(), cw, ch, (uint8_t *)stage.contents, &as);
+        stats().transcode_ns += now_ns() - t0;
+        stats().transcode_blocks += as.blocks;
+    } else {
+        if (!xcode_group_) xcode_group_ = dispatch_group_create();
+        auto src = std::make_shared<std::vector<uint8_t>>(std::move(blocks));
+        uint8_t *dst = (uint8_t *)stage.contents;
+        const uint32_t bb = tex::bc_block_bytes(f);
+        dispatch_queue_t q = dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0);
+        for (uint32_t r0 = 0; r0 < bh; r0 += stripe_rows) {
+            const uint32_t rows = std::min(stripe_rows, bh - r0);
+            const uint32_t h = std::min(ch - r0 * 4, rows * 4);
+            dispatch_group_async(xcode_group_, q, ^{
+                (void)stage;   // keep the staging buffer alive while writing into it
+                const uint64_t t0 = now_ns();
+                tex::AstcStats as;
+                tex::bc_to_astc_level(f, src->data() + (size_t)r0 * bw * bb, cw, h, dst + (size_t)r0 * bw * 16, &as);
+                stats().transcode_ns += now_ns() - t0;
+                stats().transcode_blocks += as.blocks;
+            });
+        }
+        stats().transcode_async_levels++;
+    }
+    id<MTLBlitCommandEncoder> b = upload_enc(early);
+    [b copyFromBuffer:stage sourceOffset:0 sourceBytesPerRow:bw * 16 sourceBytesPerImage:len sourceSize:sz toTexture:t destinationSlice:slice destinationLevel:level destinationOrigin:o];
     retire_buffer(stage, serial_);
 }
 
@@ -496,15 +553,126 @@ bool MtlDevice::gpu_readback(id<MTLTexture> t, uint32_t level, uint32_t slice, M
     return true;
 }
 
-void MtlDevice::gpu_generate_mips(id<MTLTexture> t) {
+void MtlDevice::gpu_generate_mips(id<MTLTexture> t, bool early) {
     if (t.pixelFormat == MTLPixelFormatASTC_4x4_LDR) return;
-    id<MTLBlitCommandEncoder> b = blit_enc();
+    id<MTLBlitCommandEncoder> b = early ? upload_enc(true) : blit_enc();
     [b generateMipmapsForTexture:t];
 }
 
-void MtlDevice::gpu_copy_texture(id<MTLTexture> src, uint32_t sl, uint32_t ss, MTLOrigin so, MTLSize sz, id<MTLTexture> dst, uint32_t dl, uint32_t ds, MTLOrigin dorg) {
-    id<MTLBlitCommandEncoder> b = blit_enc();
+void MtlDevice::gpu_copy_texture(id<MTLTexture> src, uint32_t sl, uint32_t ss, MTLOrigin so, MTLSize sz, id<MTLTexture> dst, uint32_t dl, uint32_t ds, MTLOrigin dorg,
+                                 bool early) {
+    id<MTLBlitCommandEncoder> b = early ? upload_enc(true) : blit_enc();
     [b copyFromTexture:src sourceSlice:ss sourceLevel:sl sourceOrigin:so sourceSize:sz toTexture:dst destinationSlice:ds destinationLevel:dl destinationOrigin:dorg];
+}
+
+// ---- per-pass GPU timing (DISH_METAL_PASS_TIMING) ---------------------------------------------------------------------------------
+// Each render pass of a timed frame samples GPU timestamps at the start and end of its vertex and fragment stages; the log then lists
+// the passes with their attachments, load actions, draw count and times. Apple GPUs overlap the vertex stage of a pass with the
+// fragment stage of the one before, so "frag" is the meaningful column (it includes the attachment loads and stores).
+static const char *pf_name(MTLPixelFormat f) {
+    switch (f) {
+        case MTLPixelFormatBGRA8Unorm: return "BGRA8"; case MTLPixelFormatBGRA8Unorm_sRGB: return "BGRA8s"; case MTLPixelFormatRGBA8Unorm: return "RGBA8";
+        case MTLPixelFormatRGBA16Float: return "RGBA16F"; case MTLPixelFormatRG16Float: return "RG16F"; case MTLPixelFormatR32Float: return "R32F";
+        case MTLPixelFormatRG32Float: return "RG32F"; case MTLPixelFormatRGBA32Float: return "RGBA32F"; case MTLPixelFormatR16Float: return "R16F";
+        case MTLPixelFormatRGB10A2Unorm: return "RGB10A2"; case MTLPixelFormatDepth32Float_Stencil8: return "D32S8"; case MTLPixelFormatDepth32Float: return "D32";
+        case MTLPixelFormatDepth16Unorm: return "D16"; case MTLPixelFormatR8Unorm: return "R8"; case MTLPixelFormatRG8Unorm: return "RG8";
+        default: return "fmt?";
+    }
+}
+
+void MtlDevice::pass_timing_frame_begin() {
+    if (@available(iOS 14.0, *)) {
+        if (![mdev_ supportsCounterSampling:MTLCounterSamplingPointAtStageBoundary]) {
+            static bool said = false;
+            if (!said) { said = true; LOGW(LC_GFX, "metal: pass timing: this GPU cannot sample timestamps at stage boundaries"); }
+            return;
+        }
+        id<MTLCounterSet> ts = nil;
+        for (id<MTLCounterSet> cs in mdev_.counterSets) if ([cs.name isEqualToString:MTLCommonCounterSetTimestamp]) ts = cs;
+        if (!ts) return;
+        MTLCounterSampleBufferDescriptor *d = [[MTLCounterSampleBufferDescriptor alloc] init];
+        d.counterSet = ts;
+        d.storageMode = MTLStorageModeShared;
+        d.sampleCount = 4 * 256;
+        NSError *err = nil;
+        pt_buf_ = [mdev_ newCounterSampleBufferWithDescriptor:d error:&err];
+        if (!pt_buf_) { LOGW(LC_GFX, "metal: pass timing: no sample buffer (%s)", err ? [[err localizedDescription] UTF8String] : "?"); return; }
+        pt_passes_.clear();
+        pt_blits_ = pt_cmdbufs_ = 0;
+        pt_frame_ = stats().frames.load();
+        MTLTimestamp c = 0, g = 0;
+        [mdev_ sampleTimestamps:&c gpuTimestamp:&g];
+        pt_cpu0_ = c; pt_gpu0_ = g;
+        pt_active_ = true;
+    }
+}
+
+void MtlDevice::pass_timing_attach(MTLRenderPassDescriptor *rp) {
+    if (@available(iOS 14.0, *)) {
+        if (!pt_buf_ || pt_passes_.size() >= 256) return;
+        const NSUInteger i = pt_passes_.size();
+        MTLRenderPassSampleBufferAttachmentDescriptor *sa = rp.sampleBufferAttachments[0];
+        sa.sampleBuffer = pt_buf_;
+        sa.startOfVertexSampleIndex = 4 * i;
+        sa.endOfVertexSampleIndex = 4 * i + 1;
+        sa.startOfFragmentSampleIndex = 4 * i + 2;
+        sa.endOfFragmentSampleIndex = 4 * i + 3;
+        std::string desc;
+        char b[128];
+        for (int c = 0; c < 4; c++) {
+            MTLRenderPassColorAttachmentDescriptor *ca = rp.colorAttachments[c];
+            if (!ca.texture) continue;
+            snprintf(b, sizeof b, "%sc%d %lux%lu %s %s", desc.empty() ? "" : ", ", c, (unsigned long)ca.texture.width >> ca.level, (unsigned long)ca.texture.height >> ca.level,
+                     pf_name(ca.texture.pixelFormat), ca.loadAction == MTLLoadActionClear ? "clear" : ca.loadAction == MTLLoadActionLoad ? "load" : "dontcare");
+            desc += b;
+        }
+        if (rp.depthAttachment.texture) {
+            MTLRenderPassDepthAttachmentDescriptor *da = rp.depthAttachment;
+            snprintf(b, sizeof b, "%sdepth %s %s", desc.empty() ? "" : ", ", pf_name(da.texture.pixelFormat),
+                     da.loadAction == MTLLoadActionClear ? "clear" : da.loadAction == MTLLoadActionLoad ? "load" : "dontcare");
+            desc += b;
+        }
+        pt_passes_.push_back({desc, 0});
+        pt_open_ = true;
+    }
+}
+
+void MtlDevice::pass_timing_frame_end() {
+    pt_active_ = false;
+    if (pt_open_) { pt_passes_.back().draws = enc_draws_; pt_open_ = false; }
+    if (@available(iOS 14.0, *)) {
+        id<MTLCounterSampleBuffer> buf = pt_buf_;
+        pt_buf_ = nil;
+        if (!buf || pt_passes_.empty()) return;
+        auto passes = std::make_shared<std::vector<TimedPass>>(std::move(pt_passes_));
+        pt_passes_.clear();
+        const uint64_t c0 = pt_cpu0_, g0 = pt_gpu0_, frame = pt_frame_;
+        const uint32_t blits = pt_blits_, cbs = pt_cmdbufs_ + 1;
+        id<MTLDevice> md = mdev_;
+        [cmd_ addCompletedHandler:^(id<MTLCommandBuffer>) {
+            MTLTimestamp c1 = 0, g1 = 0;
+            [md sampleTimestamps:&c1 gpuTimestamp:&g1];
+            const double ns_per_tick = (g1 > g0 && c1 > c0) ? (double)(c1 - c0) / (double)(g1 - g0) : 1.0;
+            NSData *data = [buf resolveCounterRange:NSMakeRange(0, 4 * passes->size())];
+            if (!data) { LOGW(LC_GFX, "metal: pass timing: cannot resolve the samples"); return; }
+            const MTLCounterResultTimestamp *t = (const MTLCounterResultTimestamp *)data.bytes;
+            const size_t n = std::min(passes->size(), (size_t)data.length / (4 * sizeof(MTLCounterResultTimestamp)));
+            auto ok = [](uint64_t v) { return v != 0 && v != MTLCounterErrorValue; };
+            uint64_t first = UINT64_MAX, last = 0;
+            for (size_t i = 0; i < 4 * n; i++) if (ok(t[i].timestamp)) { first = std::min(first, t[i].timestamp); last = std::max(last, t[i].timestamp); }
+            double frag_total = 0;
+            for (size_t i = 0; i < n; i++)
+                if (ok(t[4 * i + 2].timestamp) && ok(t[4 * i + 3].timestamp)) frag_total += (double)(t[4 * i + 3].timestamp - t[4 * i + 2].timestamp) * ns_per_tick / 1e6;
+            LOGI(LC_GFX, "pass timing, frame %llu: %zu render passes, %u blit encoders, %u command buffers; fragment stages %.2f ms, first to last sample %.2f ms",
+                 (unsigned long long)frame, n, blits, cbs, frag_total, first < last ? (double)(last - first) * ns_per_tick / 1e6 : 0.0);
+            for (size_t i = 0; i < n; i++) {
+                const MTLCounterResultTimestamp *p = t + 4 * i;
+                auto ms = [&](int a, int b) { return ok(p[a].timestamp) && ok(p[b].timestamp) && p[b].timestamp >= p[a].timestamp ? (double)(p[b].timestamp - p[a].timestamp) * ns_per_tick / 1e6 : -1.0; };
+                const double at = ok(p[0].timestamp) && first != UINT64_MAX ? (double)(p[0].timestamp - first) * ns_per_tick / 1e6 : -1.0;
+                LOGI(LC_GFX, "  pass %3zu at %6.2f ms: vert %5.2f ms, frag %5.2f ms, %4u draws; %s", i, at, ms(0, 1), ms(2, 3), (*passes)[i].draws, (*passes)[i].desc.c_str());
+            }
+        }];
+    }
 }
 
 // ---- queries ----------------------------------------------------------------------------------------------------------------------------------
@@ -615,6 +783,7 @@ HRESULT MtlDevice::do_present() {
         rp.colorAttachments[0].loadAction = MTLLoadActionClear;
         rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1);
         rp.colorAttachments[0].storeAction = MTLStoreActionStore;
+        if (pt_active_) pass_timing_attach(rp);   // the gap before it is the MetalFX upscale
         id<MTLRenderCommandEncoder> e = [cmd_ renderCommandEncoderWithDescriptor:rp];
         id<MTLRenderPipelineState> pso = blit_pso(dr.texture.pixelFormat, true);
         if (pso) {
@@ -632,6 +801,7 @@ HRESULT MtlDevice::do_present() {
             [e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
         }
         [e endEncoding];
+        if (pt_open_) { pt_passes_.back().draws = 1; pt_passes_.back().desc += " (present)"; pt_open_ = false; }
         // frame pacing (DISH_FRAME_RATE_CAP / dish_settings.ini frame_rate_cap): auto = 60 Hz, or 30 Hz while the phone is thermally
         // serious (it throttles anyway; a steady 30 beats an uneven 40); 30 / 60 = fixed
         const int cap = options().fps_cap;
@@ -640,6 +810,7 @@ HRESULT MtlDevice::do_present() {
         if (pp_.PresentationInterval == D3DPRESENT_INTERVAL_IMMEDIATE && !hot30) interval = 0.0;
         if (interval > 0.0) [cmd_ presentDrawable:dr afterMinimumDuration:interval];
         else [cmd_ presentDrawable:dr];
+        if (pt_active_) pass_timing_frame_end();
         signal_frame_ = true;
         flush(false);
         // next frame slot: 3 frames in flight at most
@@ -651,20 +822,25 @@ HRESULT MtlDevice::do_present() {
         memset(nf.vis.contents, 0, nf.vis.length);
         ring_epoch_++;
         stats().frames++;
+        {
+            const long f0 = options().pass_timing_frame, every = options().pass_timing_every;
+            const long f = (long)stats().frames.load();
+            if (f0 >= 0 && f >= f0 && (f == f0 || (every > 0 && (f - f0) % every == 0))) pass_timing_frame_begin();
+        }
         static uint64_t last_report_ns = 0;
         const uint64_t tnow = now_ns();
         {
             // hitch log: a frame over 50 ms says what happened during it (first-use shaders / pipelines, texture conversion, file reads)
-            struct Snap { uint64_t t, shaders, pipes, archive, blocks, xcode_ns, upload, read; };
+            struct Snap { uint64_t t, shaders, pipes, blocks, xcode_ns, upload, read; };
             static Snap prev{};
             MtlStats &s = stats();
-            Snap cur{tnow, s.shaders_created.load(), s.pipelines_created.load(), s.pipeline_archive_hits.load(), s.transcode_blocks.load(),
+            Snap cur{tnow, s.shaders_created.load(), s.pipelines_created.load(), s.transcode_blocks.load(),
                      s.transcode_ns.load() + s.decode_ns.load(), s.upload_bytes.load(), file_read_bytes_total()};
             if (prev.t && cur.t - prev.t > 50000000ull) {
-                LOGI(LC_GFX, "hitch: %.0f ms frame; %llu new shaders (%lld compiling), %llu new pipelines (%llu from archive), %.1f MB textures "
+                LOGI(LC_GFX, "hitch: %.0f ms frame; %llu new shaders (%lld compiling), %llu new pipelines, %.1f MB textures "
                      "uploaded (%.0f ms converting), %.1f MB read from files",
                      (cur.t - prev.t) / 1e6, (unsigned long long)(cur.shaders - prev.shaders), (long long)s.shaders_pending.load(),
-                     (unsigned long long)(cur.pipes - prev.pipes), (unsigned long long)(cur.archive - prev.archive), (cur.upload - prev.upload) / 1048576.0,
+                     (unsigned long long)(cur.pipes - prev.pipes), (cur.upload - prev.upload) / 1048576.0,
                      (cur.xcode_ns - prev.xcode_ns) / 1e6, (cur.read - prev.read) / 1048576.0);
             }
             prev = cur;
@@ -672,10 +848,10 @@ HRESULT MtlDevice::do_present() {
         if (tnow - last_report_ns > 5000000000ull) {
             last_report_ns = tnow;
             MtlStats &s = stats();
-            LOGI(LC_GFX, "metal: shaders %llu created, %lld compiling, %llu failed (translate %.0f ms, compile %.0f ms total); pipelines %llu (%llu from archive, %.0f ms); draws skipped for compiling shaders %llu",
+            LOGI(LC_GFX, "metal: shaders %llu created, %lld compiling, %llu failed (translate %.0f ms, compile %.0f ms total); pipelines %llu (%.0f ms); draws skipped for compiling shaders %llu",
                  (unsigned long long)s.shaders_created.load(), (long long)s.shaders_pending.load(), (unsigned long long)s.shader_failures.load(),
                  s.shader_translate_ns.load() / 1e6, s.shader_compile_ns.load() / 1e6, (unsigned long long)s.pipelines_created.load(),
-                 (unsigned long long)s.pipeline_archive_hits.load(), s.pipeline_create_ns.load() / 1e6, (unsigned long long)s.draws_skipped_shader.load());
+                 s.pipeline_create_ns.load() / 1e6, (unsigned long long)s.draws_skipped_shader.load());
             if (s.draws_skipped_pso.load()) LOGI(LC_GFX, "metal: draws skipped for pipelines being built %llu", (unsigned long long)s.draws_skipped_pso.load());
             {
                 static uint64_t last_busy = 0, last_frames = 0;
@@ -685,10 +861,13 @@ HRESULT MtlDevice::do_present() {
                          (unsigned long long)(fr - last_frames), (busy - last_busy) / 50000000.0);
                 last_busy = busy; last_frames = fr;
             }
-            LOGI(LC_GFX, "metal: textures %.0f MiB on the GPU; DXT %s: %llu blocks in %.0f ms; copy tokens %llu out, %llu used",
+            LOGI(LC_GFX, "metal: textures %.0f MiB on the GPU; DXT %s: %llu blocks in %.0f ms (%llu levels on workers, commits waited %.0f ms); "
+                 "copy tokens %llu out, %llu used; uploads %llu, %llu ahead of the frame",
                  s.gpu_bytes_textures.load() / 1048576.0, options().astc ? "-> ASTC" : "-> RGBA8 decode",
                  (unsigned long long)s.transcode_blocks.load(), (options().astc ? s.transcode_ns.load() : s.decode_ns.load()) / 1e6,
-                 (unsigned long long)s.copy_tokens_out.load(), (unsigned long long)s.copy_tokens_used.load());
+                 (unsigned long long)s.transcode_async_levels.load(), s.transcode_wait_ns.load() / 1e6,
+                 (unsigned long long)s.copy_tokens_out.load(), (unsigned long long)s.copy_tokens_used.load(),
+                 (unsigned long long)s.uploads.load(), (unsigned long long)s.early_uploads.load());
         }
     }
     return D3D_OK;

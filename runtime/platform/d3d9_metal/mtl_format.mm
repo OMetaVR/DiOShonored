@@ -104,6 +104,11 @@ const Options &options() {
         }
         if (const char *e = getenv("DISH_METAL_INTERNAL_HEIGHT")) o.internal_height = std::max(240, atoi(e));
         if (const char *e = getenv("DISH_FRAME_RATE_CAP")) o.fps_cap = atoi(e) == 30 ? 30 : atoi(e) == 60 ? 60 : 0;
+        if (const char *e = getenv("DISH_METAL_PASS_TIMING")) {
+            char *end = nullptr;
+            o.pass_timing_frame = strtol(e, &end, 10);
+            if (end && *end == ':') o.pass_timing_every = std::max(0L, strtol(end + 1, nullptr, 10));
+        }
         if (const char *e = getenv("DISH_METAL_VALIDATE")) o.verbose = e[0] && e[0] != '0';
         if (const char *e = getenv("DISH_METAL_CACHE_DIR")) o.cache_dir = e;
         if (o.cache_dir.empty()) {

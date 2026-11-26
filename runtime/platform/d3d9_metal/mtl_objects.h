@@ -133,7 +133,7 @@ struct TexData {
     void upload(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t z, uint32_t rw, uint32_t rh, uint32_t rd, const uint8_t *src, uint32_t pitch, uint32_t slice);
     // read a region back in the D3D layout (waits for the GPU when needed)
     bool readback(uint32_t face, uint32_t level, uint32_t x, uint32_t y, uint32_t rw, uint32_t rh, uint8_t *dst, uint32_t pitch);
-    void generate_mips();
+    void generate_mips(bool early = false);
 };
 
 // IDirect3DBaseTexture9 methods (same for 2D / cube / volume textures)
@@ -262,6 +262,7 @@ public:
 
 struct ShaderCommon {
     MtlDevice *dev = nullptr;
+    IUnknown *owner = nullptr;      // enclosing COM shader (retained by async compile blocks so Release cannot free us mid-compile)
     std::vector<uint32_t> bytecode;
     ShaderXlate x;
     bool is_pixel = false;
@@ -273,7 +274,7 @@ struct ShaderCommon {
     id<MTLLibrary> lib = nil;
     id<MTLFunction> fn = nil;
     std::string error;
-    void start(MtlDevice *d, const uint32_t *code, bool pixel);
+    void start(MtlDevice *d, IUnknown *owner_obj, const uint32_t *code, bool pixel);
     bool wait();                    // blocks until compiled; true when usable
     bool ready() const { return state.load(std::memory_order_acquire) == 1; }
     bool failed() const { return state.load(std::memory_order_acquire) == 2; }

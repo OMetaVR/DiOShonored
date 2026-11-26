@@ -18,6 +18,7 @@
 #include <mach/exc.h>
 #include <mach/thread_status.h>
 #include <pthread.h>
+#include <sys/ucontext.h>
 #elif defined(__APPLE__)
 #include <sys/ucontext.h>
 #else
@@ -52,27 +53,36 @@ void fault_set_log_path(const char *path) { snprintf(g_log_path, sizeof g_log_pa
         n = snprintf(buf, sizeof buf, "\n=== HOST FAULT (%s) at address %p, pc %p, thread tid=%u ===\n", kind, (void *)fa, pc,
                      t ? t->tid : 0);
     }
-    // the whole report goes to stderr and to fault.log (on a phone stderr goes nowhere); the host backtrace carries the lifted
-    // functions' names (g_XXXXXXXX), i.e. the guest call chain
+    // the whole report goes to stderr, fault.log and the main log (on a phone stderr goes nowhere); the host backtrace carries the lifted
+    // functions' names (g_XXXXXXXX), i.e. the guest call chain. Write and fsync the header before dladdr/backtrace so a corrupt stack
+    // still leaves the faulting address and PC on disk.
     int lf = open(g_log_path, O_WRONLY | O_CREAT | O_APPEND, 0644);
+    int mf = log_file_fd();
     auto out = [&](const char *p, size_t len) {
         (void)!write(2, p, len);
         if (lf >= 0) (void)!write(lf, p, len);
+        if (mf >= 0) (void)!write(mf, p, len);
+    };
+    auto sync_logs = [&]() {
+        if (lf >= 0) fsync(lf);
+        if (mf >= 0) fsync(mf);
     };
     out(buf, (size_t)n);
+    sync_logs();
     Dl_info di;
     if (pc && dladdr(pc, &di) && di.dli_sname) {
         n = snprintf(buf, sizeof buf, "  host symbol   : %s+0x%lx\n", di.dli_sname, (unsigned long)((char *)pc - (char *)di.dli_saddr));
         out(buf, (size_t)n);
+        sync_logs();
     }
     void *frames[64];
     int nf = backtrace(frames, 64);
     out("  host backtrace:\n", 18);
     backtrace_symbols_fd(frames, nf, 2);
-    if (lf >= 0) {
-        backtrace_symbols_fd(frames, nf, lf);
-        close(lf);
-    }
+    if (lf >= 0) backtrace_symbols_fd(frames, nf, lf);
+    if (mf >= 0) backtrace_symbols_fd(frames, nf, mf);
+    sync_logs();
+    if (lf >= 0) close(lf);
     abort();
 }
 
@@ -87,8 +97,8 @@ static inline bool addr_in_guest(uintptr_t fa) {
 // handler thread receives mach_exception_raise_state_identity messages (64-bit codes). A guest-memory fault gets
 // the faulting thread redirected, by editing its arm64 thread state in the reply, into fault_trampoline running on
 // that same thread (valid stack, so the diagnostic backtrace and the test hooks work as on Linux). Any other fault
-// is answered with KERN_FAILURE, which makes the kernel fall through to the task/host handlers, i.e. the normal
-// crash path. Nothing here uses signals (no SIGSEGV handler is installed on this platform).
+// is answered with KERN_FAILURE, which makes the kernel fall through to the task/host handlers and then to a signal: a
+// signal handler only logs those host crashes (see on_host_crash) and passes them on.
 // ---------------------------------------------------------------------------------------------------------------
 #pragma pack(push, 4)
 struct MachExcRequest {   // __Request__mach_exception_raise_state_identity_t (mach_exc.defs, id 2407)
@@ -215,8 +225,72 @@ static void *mach_handler_thread(void *) {
     return nullptr;
 }
 
+// Crashes the Mach handler does not claim (host code, Metal / GCD threads, aborts) end as signals; log the thread and its backtrace
+// to fault.log and the main log, then hand the signal on to whoever had it (LiveContainer, the default crash report)
+static struct sigaction g_old_host[32];
+static void install_altstack() {
+    size_t sz = 128 * 1024;
+    void *stk = mmap(nullptr, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    if (stk == MAP_FAILED) return;
+    stack_t ss;
+    ss.ss_sp = stk;
+    ss.ss_size = sz;
+    ss.ss_flags = 0;
+    sigaltstack(&ss, nullptr);
+}
+
+static void on_host_crash(int sig, siginfo_t *si, void *ucv) {
+    if (g_in_fault) { sigaction(sig, &g_old_host[sig], nullptr); return; }
+    g_in_fault = 1;
+    char name[64] = "?";
+    pthread_getname_np(pthread_self(), name, sizeof name);
+    uint64_t tid = 0;
+    pthread_threadid_np(nullptr, &tid);
+    const uintptr_t pc = ucv ? (uintptr_t)((ucontext_t *)ucv)->uc_mcontext->__ss.__pc : 0;
+    char buf[512];
+    const int n = snprintf(buf, sizeof buf, "\n=== HOST CRASH: signal %d (%s) at address %p, pc %p, thread t%llu '%s' ===\n", sig, strsignal(sig),
+                           si ? si->si_addr : nullptr, (void *)pc, (unsigned long long)tid, name);
+    const int fds[2] = {open(g_log_path, O_WRONLY | O_CREAT | O_APPEND, 0644), log_file_fd()};
+    // Flush the header first so a secondary fault inside dladdr / backtrace still leaves the crash line on disk.
+    for (int fd : fds) {
+        if (fd < 0) continue;
+        (void)!write(fd, buf, (size_t)n);
+        fsync(fd);
+    }
+    Dl_info di;
+    char sym[512];
+    int sn = 0;
+    if (pc && dladdr((void *)pc, &di) && di.dli_sname) sn = snprintf(sym, sizeof sym, "  pc symbol: %s+0x%lx\n", di.dli_sname, (unsigned long)(pc - (uintptr_t)di.dli_saddr));
+    if (sn > 0) {
+        for (int fd : fds) {
+            if (fd < 0) continue;
+            (void)!write(fd, sym, (size_t)sn);
+            fsync(fd);
+        }
+    }
+    void *frames[64];
+    const int nf = backtrace(frames, 64);
+    for (int fd : fds) {
+        if (fd < 0) continue;
+        backtrace_symbols_fd(frames, nf, fd);
+        fsync(fd);
+    }
+    if (fds[0] >= 0) close(fds[0]);
+    sigaction(sig, &g_old_host[sig], nullptr);   // returning re-raises it (a fault re-executes, abort() raises again)
+    g_in_fault = 0;
+}
+
 void fault_install() {
     if (g_installed) return;
+    install_altstack();
+    {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = on_host_crash;
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+        sigemptyset(&sa.sa_mask);
+        for (int sig : {SIGSEGV, SIGBUS, SIGILL, SIGABRT, SIGTRAP, SIGFPE}) sigaction(sig, &sa, &g_old_host[sig]);
+    }
     if (mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &g_port) != KERN_SUCCESS) return;
     if (mach_port_insert_right(mach_task_self(), g_port, g_port, MACH_MSG_TYPE_MAKE_SEND) != KERN_SUCCESS) return;
     pthread_attr_t at;
@@ -235,6 +309,7 @@ void fault_thread_init() {
     if (!g_installed) fault_install();
     if (!g_installed) return;
     done = true;
+    install_altstack();
     mach_port_t self = mach_thread_self();
     thread_set_exception_ports(self, EXC_MASK_BAD_ACCESS, g_port, EXCEPTION_STATE_IDENTITY | MACH_EXCEPTION_CODES, ARM_THREAD_STATE64);
     mach_port_deallocate(mach_task_self(), self);

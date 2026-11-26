@@ -106,9 +106,6 @@ void recorder_init() {
 }  // namespace
 
 uint64_t shader_content_hash(const uint32_t *tokens, size_t n) { return fnv_bytes(tokens, n * 4); }
-// v2: archives written before depth-only pipelines were excluded cannot be packed again ("expecting 'fragment' stage")
-std::string pipeline_archive_path() { return options().cache_dir.empty() ? std::string() : options().cache_dir + "/pipelines-v2.archive"; }
-
 bool compile_shader(id<MTLDevice> md, const uint32_t *tokens, size_t n, ShaderXlate *x, id<MTLLibrary> __strong *lib, id<MTLFunction> __strong *fn,
                     std::string *err, uint64_t *translate_ns, uint64_t *compile_ns) {
     uint64_t t0 = now_ns();
@@ -209,19 +206,6 @@ void shader_prep_start(ShaderPrepStatus *st) {
         st->pipelines_total = (uint32_t)pipes.size();
         const uint64_t t0 = now_ns();
         LOGI(LC_GFX, "shader prep: %zu shaders, %zu pipelines recorded%s", shaders.size(), pipes.size(), st->background.load() ? " (background)" : "");
-        // the binary archive the device loads (foreground only: in the background the running game's device owns the file)
-        id<MTLBinaryArchive> arch = nil;
-        std::mutex arch_mu;
-        uint32_t arch_added = 0;
-        const std::string arch_path = pipeline_archive_path();
-        if (@available(iOS 14.0, *)) {
-            MTLBinaryArchiveDescriptor *ad = [[MTLBinaryArchiveDescriptor alloc] init];
-            struct stat sb;
-            if (stat(arch_path.c_str(), &sb) == 0) ad.url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:arch_path.c_str()]];
-            NSError *e = nil;
-            arch = [md newBinaryArchiveWithDescriptor:ad error:&e];
-            if (!arch) { ad.url = nil; arch = [md newBinaryArchiveWithDescriptor:ad error:&e]; }
-        }
         auto set_qos = [st] {
             pthread_set_qos_class_self_np(st->background.load() ? QOS_CLASS_UTILITY : QOS_CLASS_USER_INITIATED, 0);
         };
@@ -264,14 +248,8 @@ void shader_prep_start(ShaderPrepStatus *st) {
                     if (ok) {
                         MTLRenderPipelineDescriptor *d = make_pso_desc(h.key, vf, vx.inputs, pf, &elems);
                         NSError *e = nil;
-                        id<MTLRenderPipelineState> pso = [md newRenderPipelineStateWithDescriptor:d error:&e];
+                        id<MTLRenderPipelineState> pso = [md newRenderPipelineStateWithDescriptor:d error:&e];   // fills the system cache
                         ok = pso != nil;
-                        if (ok && pf && !st->background.load()) {
-                            if (@available(iOS 14.0, *)) {
-                                std::lock_guard<std::mutex> lk(arch_mu);
-                                if (arch && [arch addRenderPipelineFunctionsWithDescriptor:d error:&e]) arch_added++;
-                            }
-                        }
                     }
                     if (!ok) st->failures++;
                 }
@@ -282,19 +260,12 @@ void shader_prep_start(ShaderPrepStatus *st) {
         std::vector<std::thread> ws;
         for (unsigned i = 0; i < n; i++) ws.emplace_back(worker);
         for (auto &w : ws) w.join();
-        if (@available(iOS 14.0, *)) {
-            if (arch && arch_added && !st->background.load()) {
-                NSError *e = nil;
-                if (![arch serializeToURL:[NSURL fileURLWithPath:[NSString stringWithUTF8String:arch_path.c_str()]] error:&e])
-                    LOGW(LC_GFX, "shader prep: cannot save the pipeline archive: %s", e ? [[e localizedDescription] UTF8String] : "?");
-            }
-        }
         const bool complete = !st->cancel.load() && st->shaders_done.load() == shaders.size() && st->pipelines_done.load() == pipes.size();
         if (complete) {
             if (FILE *f = fopen(prepared_file().c_str(), "w")) { fprintf(f, "%zu %zu\n", shaders.size(), pipes.size()); fclose(f); }
         }
-        LOGI(LC_GFX, "shader prep: %s in %.1f s: %u shaders, %u pipelines (%u added to the archive), %u failures", complete ? "done" : "stopped",
-             (now_ns() - t0) / 1e9, st->shaders_done.load(), st->pipelines_done.load(), arch_added, st->failures.load());
+        LOGI(LC_GFX, "shader prep: %s in %.1f s: %u shaders, %u pipelines, %u failures", complete ? "done" : "stopped",
+             (now_ns() - t0) / 1e9, st->shaders_done.load(), st->pipelines_done.load(), st->failures.load());
         st->finished = true;
     }).detach();
 }

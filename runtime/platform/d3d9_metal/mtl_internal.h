@@ -104,8 +104,9 @@ uint32_t full_mip_count(uint32_t w, uint32_t h, uint32_t d = 1);
 
 // ---- statistics (read by the on-device acceptance app) ------------------------------------------------------------------------
 struct MtlStats {
-    std::atomic<uint64_t> draws{0}, clears{0}, pipelines_created{0}, pipeline_archive_hits{0}, shaders_created{0}, shader_failures{0};
+    std::atomic<uint64_t> draws{0}, clears{0}, pipelines_created{0}, shaders_created{0}, shader_failures{0};
     std::atomic<uint64_t> uploads{0}, upload_bytes{0}, transcode_blocks{0}, transcode_in_bytes{0}, decode_in_bytes{0};
+    std::atomic<uint64_t> early_uploads{0}, transcode_async_levels{0}, transcode_wait_ns{0};
     std::atomic<uint64_t> copy_tokens_out{0}, copy_tokens_used{0};
     std::atomic<uint64_t> ring_bytes{0}, frames{0}, readbacks{0}, command_buffers{0};
     std::atomic<uint64_t> shader_translate_ns{0}, shader_compile_ns{0}, pipeline_create_ns{0}, transcode_ns{0}, decode_ns{0};
@@ -118,7 +119,7 @@ struct MtlStats {
 MtlStats &stats();
 
 // Runtime options (environment): DISH_METAL_ASTC=0 (DXT -> RGBA8 instead of ASTC), DISH_METAL_TEX_SHADOW=1 (CPU copies of DXT levels), DISH_METAL_UPSCALE=metalfx|bilinear|off, DISH_METAL_INTERNAL_HEIGHT=720,
-// DISH_METAL_VALIDATE=1 (extra logging), DISH_METAL_CACHE_DIR=<dir> (pipeline archive and transcode cache; default Library/Caches/DishMetal).
+// DISH_METAL_VALIDATE=1 (extra logging), DISH_METAL_CACHE_DIR=<dir> (shader / pipeline record; default Library/Caches/DishMetal).
 struct Options {
     bool sync_shaders = false;       // DISH_METAL_SYNC_SHADERS=1: draws wait for their shaders instead of being skipped while they compile
     bool astc = true;                // DISH_METAL_ASTC=0: decode DXT to RGBA8 instead of transcoding to ASTC 4x4
@@ -126,6 +127,8 @@ struct Options {
     int upscale = 1;                 // 0 off (bilinear/nearest blit), 1 MetalFX spatial when available, else blit
     int internal_height = 720;
     int fps_cap = 0;                 // DISH_FRAME_RATE_CAP: 0 = auto (60, 30 while thermally serious), 30, 60
+    long pass_timing_frame = -1;     // DISH_METAL_PASS_TIMING=<frame>[:<every>]: log each render pass's GPU time in those frames
+    long pass_timing_every = 0;
     bool verbose = false;
     std::string cache_dir;
 };

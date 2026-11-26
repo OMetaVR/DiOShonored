@@ -180,13 +180,13 @@ void gpu_stats_json(std::string *out) {
     MemStats ms = memacct_query();
     char b[2048];
     snprintf(b, sizeof b,
-             "{\"draws\":%llu,\"clears\":%llu,\"frames\":%llu,\"command_buffers\":%llu,\"pipelines_created\":%llu,\"pipeline_archive_hits\":%llu,\"pipeline_create_ms\":%.3f,"
+             "{\"draws\":%llu,\"clears\":%llu,\"frames\":%llu,\"command_buffers\":%llu,\"pipelines_created\":%llu,\"pipeline_create_ms\":%.3f,"
              "\"shaders_created\":%llu,\"shader_failures\":%llu,\"shader_translate_ms\":%.3f,\"shader_compile_ms\":%.3f,"
              "\"uploads\":%llu,\"upload_bytes\":%llu,\"readbacks\":%llu,\"ring_bytes\":%llu,"
              "\"decode_in_bytes\":%llu,\"decode_ms\":%.3f,\"transcode_in_bytes\":%llu,\"transcode_blocks\":%llu,\"transcode_ms\":%.3f,"
              "\"gpu_bytes_textures\":%llu,\"gpu_bytes_buffers\":%llu,\"footprint\":%llu,\"os_available\":%llu}",
              (unsigned long long)s.draws.load(), (unsigned long long)s.clears.load(), (unsigned long long)s.frames.load(), (unsigned long long)s.command_buffers.load(),
-             (unsigned long long)s.pipelines_created.load(), (unsigned long long)s.pipeline_archive_hits.load(), s.pipeline_create_ns.load() / 1e6,
+             (unsigned long long)s.pipelines_created.load(), s.pipeline_create_ns.load() / 1e6,
              (unsigned long long)s.shaders_created.load(), (unsigned long long)s.shader_failures.load(), s.shader_translate_ns.load() / 1e6, s.shader_compile_ns.load() / 1e6,
              (unsigned long long)s.uploads.load(), (unsigned long long)s.upload_bytes.load(), (unsigned long long)s.readbacks.load(), (unsigned long long)s.ring_bytes.load(),
              (unsigned long long)s.decode_in_bytes.load(), s.decode_ns.load() / 1e6, (unsigned long long)s.transcode_in_bytes.load(), (unsigned long long)s.transcode_blocks.load(),

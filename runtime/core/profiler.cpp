@@ -153,12 +153,14 @@ void sampler(double start_s, double dur_s, double interval_ms) {
                         thread_suspend(th) == KERN_SUCCESS) {
                         arm_thread_state64_t st;
                         c = ARM_THREAD_STATE64_COUNT;
-                        if (thread_get_state(th, ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS) {
+                        // Never allocate or take locks while the target thread is suspended (it may hold the malloc lock).
+                        const bool got = thread_get_state(th, ARM_THREAD_STATE64, (thread_state_t)&st, &c) == KERN_SUCCESS;
+                        thread_resume(th);
+                        if (got) {
                             tp.running++;
                             tp.pcs[(uintptr_t)arm_thread_state64_get_pc(st)]++;
                             tp.lrs[(uintptr_t)arm_thread_state64_get_lr(st)]++;
                         }
-                        thread_resume(th);
                     }
                 }
                 mach_port_deallocate(mach_task_self(), th);

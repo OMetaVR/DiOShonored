@@ -10,7 +10,7 @@ struct ShaderPrepStatus {
     std::atomic<uint32_t> shaders_total{0}, shaders_done{0}, pipelines_total{0}, pipelines_done{0}, failures{0};
     std::atomic<bool> finished{false};
     std::atomic<bool> cancel{false};        // stop after the work in flight
-    std::atomic<bool> background{false};    // lower priority, do not write the pipeline archive (the game's device owns it)
+    std::atomic<bool> background{false};    // lower priority (the game is running)
 };
 struct ShaderPrepSummary {
     uint32_t shaders = 0, pipelines = 0;    // recorded so far

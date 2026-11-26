@@ -43,11 +43,11 @@ void sample_thread(RtThread *t, void *) {
     void *stack_hi = pthread_get_stackaddr_np(t->host_self);
     size_t stack_sz = pthread_get_stacksize_np(t->host_self);
     uintptr_t hi = (uintptr_t)stack_hi, lo = hi - stack_sz;
-    if (::thread_suspend(port) != KERN_SUCCESS) return;
     Sample &s = g_samples[g_nsamples];
     s.tid = t->tid;
     snprintf(s.name, sizeof s.name, "%s", t->name.c_str());
     s.n = 0;
+    if (::thread_suspend(port) != KERN_SUCCESS) return;
     arm_thread_state64_t st;
     mach_msg_type_number_t cnt = ARM_THREAD_STATE64_COUNT;
     if (::thread_get_state(port, ARM_THREAD_STATE64, (thread_state_t)&st, &cnt) == KERN_SUCCESS) {

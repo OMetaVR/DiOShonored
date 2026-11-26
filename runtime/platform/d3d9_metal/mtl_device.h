@@ -17,9 +17,10 @@ struct PsoKey {
     uint32_t blend_enable = 0;          // bit i: attachment i blends
     uint8_t src_rgb = 0, dst_rgb = 0, op_rgb = 0, src_a = 0, dst_a = 0, op_a = 0;
     uint8_t write_mask[4] = {};
-    uint8_t pad[2] = {};
+    uint8_t pad[6] = {};                // explicit: implicit tail padding is not initialised, and the key is hashed / compared as bytes
     bool operator==(const PsoKey &o) const { return memcmp(this, &o, sizeof *this) == 0; }
 };
+static_assert(sizeof(PsoKey) == 184, "PsoKey has no implicit padding");
 struct PsoKeyHash { size_t operator()(const PsoKey &k) const; };
 
 enum StateCat : uint32_t {
@@ -148,18 +149,29 @@ public:
     id<MTLDevice> mdev() const { return mdev_; }
     id<MTLCommandQueue> queue() const { return queue_; }
     dispatch_queue_t compile_queue() { return compile_qs_[compile_rr_++ % 4]; }
+    dispatch_queue_t urgent_compile_queue() { return urgent_qs_[urgent_rr_++ % 2]; }
     uint64_t next_shader_id() { return ++shader_ids_; }
     uint64_t cur_serial();                        // serial of the command buffer commands are being recorded into (opens one if needed)
     uint64_t completed_serial() const { return completed_.load(std::memory_order_acquire); }
     void flush(bool wait);                        // end encoders, commit; optionally wait for the GPU
     void wait_serial(uint64_t serial);            // GPU work of that serial (and earlier) has finished
     void end_pass();                              // close the current render encoder (materialising a pending clear)
+    // Uploads to textures the current command buffer has not used yet ("early" uploads) go into a separate command buffer committed
+    // just before it, so they do not split the render pass being recorded (on a tile-based GPU every split stores and reloads the
+    // attachments). Uploads to textures already drawn with in this command buffer keep their place in the command stream.
+    bool upload_early(const TexData *td) const;
+    id<MTLBlitCommandEncoder> upload_enc(bool early);
     // upload `bytes` to a level/slice region of a private texture through a staging buffer
-    void gpu_upload(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, const void *bytes, uint32_t row_pitch, uint32_t img_pitch);
+    void gpu_upload(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, const void *bytes, uint32_t row_pitch, uint32_t img_pitch,
+                    bool early = false);
+    // upload DXT blocks as ASTC: early uploads transcode on worker threads while the frame is recorded (done before the commit)
+    void gpu_upload_astc(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, int bc, std::vector<uint8_t> &&blocks, bool early);
     // copy a texture region to CPU memory (waits for the GPU)
     bool gpu_readback(id<MTLTexture> t, uint32_t level, uint32_t slice, MTLOrigin o, MTLSize sz, void *dst, uint32_t row_pitch);
-    void gpu_generate_mips(id<MTLTexture> t);
-    void gpu_copy_texture(id<MTLTexture> src, uint32_t slevel, uint32_t sslice, MTLOrigin so, MTLSize sz, id<MTLTexture> dst, uint32_t dlevel, uint32_t dslice, MTLOrigin dorg);
+    void gpu_generate_mips(id<MTLTexture> t, bool early = false);
+    void gpu_copy_texture(id<MTLTexture> src, uint32_t slevel, uint32_t sslice, MTLOrigin so, MTLSize sz, id<MTLTexture> dst, uint32_t dlevel, uint32_t dslice, MTLOrigin dorg,
+                          bool early = false);
+    bool inline_uploads_pending() const { return cmd_ && inline_upload_serial_ == serial_; }
     // shared-storage buffer pool for dynamic data (vertex / index renames, upload staging): buffers come back once the GPU is done with them
     id<MTLBuffer> acquire_buffer(size_t size);
     void retire_buffer(id<MTLBuffer> b, uint64_t last_use_serial);
@@ -218,8 +230,6 @@ private:
     bool create_backbuffer();
     void release_backbuffer();
     void configure_layer();
-    void save_archive();
-    void archive_add(MTLRenderPipelineDescriptor *d);   // any thread
     struct PrimInfo { MTLPrimitiveType prim; uint32_t verts; bool fan; };
     bool prim_info(D3DPRIMITIVETYPE t, UINT count, PrimInfo *out);
     HRESULT draw_impl(D3DPRIMITIVETYPE type, INT base_vertex, UINT start, UINT count, bool indexed);
@@ -233,6 +243,8 @@ private:
     id<MTLCommandQueue> queue_ = nil;
     dispatch_queue_t compile_qs_[4] = {nil, nil, nil, nil};
     std::atomic<uint32_t> compile_rr_{0};
+    dispatch_queue_t urgent_qs_[2] = {nil, nil};    // compiles a draw is waiting for
+    std::atomic<uint32_t> urgent_rr_{0};
     SDL_Window *window_ = nullptr;
     SDL_MetalView view_ = nullptr;
     CAMetalLayer *layer_ = nil;
@@ -261,6 +273,11 @@ private:
     std::condition_variable done_cv_;
     id<MTLRenderCommandEncoder> enc_ = nil;
     id<MTLBlitCommandEncoder> blit_ = nil;
+    id<MTLCommandBuffer> up_cmd_ = nil;          // early uploads for cmd_ (committed right before it)
+    id<MTLBlitCommandEncoder> up_blit_ = nil;
+    dispatch_group_t xcode_group_ = nil;         // transcodes writing into up_cmd_'s staging buffers
+    uint64_t inline_upload_serial_ = 0;          // serial of the last command buffer that got an in-stream upload
+    void commit_uploads();
     uint32_t enc_draws_ = 0;
     struct EncKey { void *rt[4]; uint32_t rt_level[4]; uint32_t rt_slice[4]; void *ds; } enc_key_{};
     struct PendingClear { bool color = false, depth = false, stencil = false; float c[4] = {0, 0, 0, 0}; double z = 1; uint32_t s = 0; } pend_;
@@ -291,18 +308,14 @@ private:
     std::unordered_map<size_t, std::vector<Retired>> buffer_pool_;
     std::mutex pool_mu_;
     // caches
-    // pipelines: archive hits are created inline; misses are built asynchronously by Metal and the draws that need them are
-    // skipped until ready (like draws whose shaders are compiling), so a new material does not stall the render thread
+    // pipelines: built asynchronously by Metal and the draws that need them are skipped
+    // until ready (like draws whose shaders are compiling), so a new material does not stall the render thread
     struct PsoEntry { id<MTLRenderPipelineState> pso = nil; std::atomic<int> state{0}; };   // 0 building, 1 ready, 2 failed
     std::unordered_map<PsoKey, std::shared_ptr<PsoEntry>, PsoKeyHash> pso_cache_;
-    std::mutex archive_mu_;                      // archive_ is fed from Metal's completion threads
     std::unordered_map<uint64_t, id<MTLDepthStencilState>> dss_cache_;
     std::unordered_map<uint64_t, id<MTLSamplerState>> smp_cache_;
     std::unordered_map<uint64_t, id<MTLRenderPipelineState>> misc_pso_;
     id<MTLLibrary> builtin_ = nil;
-    id<MTLBinaryArchive> archive_ = nil;
-    uint32_t archive_dirty_ = 0;
-    std::string archive_path_;
     id<MTLTexture> dummy_tex_[3] = {nil, nil, nil};
     id<MTLSamplerState> dummy_smp_ = nil;
     id<MTLBuffer> default_attr_buf_ = nil;
@@ -316,6 +329,17 @@ private:
     bool enc_srgb_ = false;
     bool thermal_serious_ = false;
     id<MTLSamplerState> present_smp_[2] = {nil, nil};
+    // per-pass GPU timing of selected frames (DISH_METAL_PASS_TIMING)
+    struct TimedPass { std::string desc; uint32_t draws = 0; };
+    bool pt_active_ = false;
+    bool pt_open_ = false;                       // the current render encoder is timed
+    id<MTLCounterSampleBuffer> pt_buf_ = nil;
+    std::vector<TimedPass> pt_passes_;
+    uint32_t pt_blits_ = 0, pt_cmdbufs_ = 0;
+    uint64_t pt_cpu0_ = 0, pt_gpu0_ = 0, pt_frame_ = 0;
+    void pass_timing_frame_end();                 // in do_present, before the frame's last commit
+    void pass_timing_frame_begin();               // after a present
+    void pass_timing_attach(MTLRenderPassDescriptor *rp);
     MtlQuery *active_occ_ = nullptr;
     uint64_t draw_unsupported_ = 0;
     // D3D host objects
